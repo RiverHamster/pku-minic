@@ -10,6 +10,6 @@ fn main() {
     }
 
     let source = fs::read_to_string(&conf.inputs[0]).unwrap();
-    let ast = sysy::parser::ExprParser::new().parse(&source).unwrap();
-    println!("{:?}", ast);
+    let parser = sysy::parser::TransUnitParser::new();
+    let ast = parser.parse(&source).unwrap();
 }

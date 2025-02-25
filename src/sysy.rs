@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 pub mod ast;
 use lalrpop_util::lalrpop_mod;
 
