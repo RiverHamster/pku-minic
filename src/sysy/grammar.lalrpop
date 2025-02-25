@@ -1,0 +1,130 @@
+// a sample grammar for testing
+// use std::str::FromStr;
+use crate::sysy::ast;
+
+grammar;
+
+match {
+    // skip spaces and comments
+    r"\s*" => {},
+    r"//[^\n\r]*[\n\r]*" => {},
+} else {
+    "int",
+    "void",
+    "return",
+} else {
+    _,
+}
+
+pub LitInt: ast::LitInt = {
+    <s:r"[1-9][0-9]*"> => ast::LitInt(i32::from_str_radix(s, 10).unwrap()),
+    <s:r"0[0-9]"> => ast::LitInt(i32::from_str_radix(s, 8).unwrap()),
+    <s:r"0x[0-9a-fA-F]+"> => ast::LitInt(i32::from_str_radix(&s[2..], 16).unwrap()),
+};
+
+pub KeyInt: ast::KeyInt = {
+    "int" => ast::KeyInt(),
+};
+
+// TODO: give precedence to keywords
+pub Ident: ast::Ident = {
+    <s:r"[a-zA-Z_][a-zA-Z0-9_]*"> => ast::Ident(s.to_string()),
+}
+
+pub Term: ast::Expr = {
+    <n: LitInt> => ast::Expr::LitInt(n),
+    <i: Ident> => ast::Expr::Ident(i),
+    "(" <e: Expr> ")" => e,
+}
+
+pub Expr: ast::Expr = {
+    // do not expand Term, or () cannot wrap expressions of lower precedence
+    #[precedence(level="0")]
+    <t: Term> => t,
+
+    #[precedence(level="1")]
+    "+" <e: Expr> => ast::UnaryExpr{
+        op: ast::UnaryOp::Pos,
+        expr: Box::new(e),
+    }.into(),
+
+    "-" <e: Expr> => ast::UnaryExpr{
+        op: ast::UnaryOp::Neg,
+        expr: Box::new(e),
+    }.into(),
+
+    "!" <e: Expr> => ast::UnaryExpr{
+        op: ast::UnaryOp::LNot,
+        expr: Box::new(e),
+    }.into(),
+
+    #[precedence(level="3")] #[assoc(side="left")]
+    <lhs: Expr> "*" <rhs: Expr> => ast::BinaryExpr{
+        op: ast::BinaryOp::Mul,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }.into(),
+
+    <lhs: Expr> "/" <rhs: Expr> => ast::BinaryExpr{
+        op: ast::BinaryOp::Div,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }.into(),
+
+    <lhs: Expr> "%" <rhs: Expr> => ast::BinaryExpr{
+        op: ast::BinaryOp::Mod,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }.into(),
+
+    #[precedence(level="4")] #[assoc(side="left")]
+    <lhs: Expr> "+" <rhs: Expr> => ast::BinaryExpr{
+        op: ast::BinaryOp::Add,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }.into(),
+
+    <lhs: Expr> "-" <rhs: Expr> => ast::BinaryExpr{
+        op: ast::BinaryOp::Sub,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }.into(),
+
+    #[precedence(level="6")] #[assoc(side="left")]
+    <lhs: Expr> "<" <rhs: Expr> => ast::BinaryExpr{
+        op: ast::BinaryOp::Lt,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }.into(),
+
+    <lhs: Expr> ">" <rhs: Expr> => ast::BinaryExpr{
+        op: ast::BinaryOp::Gt,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }.into(),
+
+    <lhs: Expr> "<=" <rhs: Expr> => ast::BinaryExpr{
+        op: ast::BinaryOp::Leq,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }.into(),
+
+    <lhs: Expr> ">=" <rhs: Expr> => ast::BinaryExpr{
+        op: ast::BinaryOp::Geq,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }.into(),
+
+    #[precedence(level="7")] #[assoc(side="left")]
+    <lhs: Expr> "==" <rhs: Expr> => ast::BinaryExpr{
+        op: ast::BinaryOp::Eq,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }.into(),
+
+    <lhs: Expr> "!=" <rhs: Expr> => ast::BinaryExpr{
+        op: ast::BinaryOp::Neq,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }.into(),
+}
