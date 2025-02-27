@@ -8,6 +8,8 @@ match {
     // skip spaces and comments
     r"\s*" => {},
     r"//[^\n\r]*[\n\r]*" => {},
+    // multiline comments, by Claude
+    r"/\*[^*]*\*+(?:[^*/][^*]*\*+)*/" => {},
     _
 }
 // } else {

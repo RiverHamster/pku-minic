@@ -9,7 +9,7 @@ pub enum OutputType {
 pub struct Config {
     pub output_type: OutputType,
     pub inputs: Vec<String>,
-    pub output: Vec<String>,
+    pub output: String,
 }
 
 pub fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
@@ -19,13 +19,17 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
     let mut conf = Config {
         output_type: OutputType::Unknown,
         inputs: Vec::new(),
-        output: Vec::new(),
+        output: String::new(),
     };
+
+    let mut output_specified = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-o" => {
-                conf.output.push(args.next().unwrap());
+                assert!(!output_specified, "Multiple output files specified");
+                conf.output = args.next().expect("No output file specified");
+                output_specified = true;
             }
             "-koopa" => {
                 assert_eq!(
@@ -48,6 +52,8 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
             }
         }
     }
+
+    assert!(output_specified, "No output file specified");
 
     assert_ne!(
         conf.output_type,
