@@ -49,12 +49,17 @@ impl IRBuilder {
                         .binary(BinaryOp::Eq, zero, expr_val),
                     ast::UnaryOp::Pos => expr_val,
                 };
-                self.prog
+
+                // dummy operator does not generate instructions
+                if *op != ast::UnaryOp::Pos {
+                    self.prog
                     .func_mut(f_handle)
                     .layout_mut()
                     .bb_mut(bb)
                     .insts_mut()
                     .extend([insn]);
+                }
+
                 insn
             }
             Expr::BinaryExpr { op, lhs, rhs } => {

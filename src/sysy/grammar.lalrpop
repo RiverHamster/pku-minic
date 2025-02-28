@@ -132,6 +132,20 @@ pub Expr: ast::Expr = {
         lhs: Box::new(lhs),
         rhs: Box::new(rhs),
     },
+
+    #[precedence(level="11")] #[assoc(side="left")]
+    <lhs: Expr> "&&" <rhs: Expr> => ast::Expr::BinaryExpr{
+        op: ast::BinaryOp::LAnd,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    },
+
+    #[precedence(level="12")] #[assoc(side="left")]
+    <lhs: Expr> "||" <rhs: Expr> => ast::Expr::BinaryExpr{
+        op: ast::BinaryOp::LOr,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    },
 }
 
 pub BaseType: ast::BaseType = {

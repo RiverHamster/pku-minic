@@ -22,5 +22,9 @@ fn main() {
         koopa_gen.generate_on(&ir_program).expect("Failed to dump Koopa IR");
         return;
     }
-    unimplemented!("RISC-V codegen");
+
+    if conf.output_type == cli::OutputType::RISCV {
+        codegen::gen_riscv_simple(&ir_program, output_file);
+        return;
+    }
 }
