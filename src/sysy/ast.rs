@@ -45,8 +45,15 @@ impl Into<Expr> for LitInt {
 pub enum Expr {
     Ident(Ident),
     LitInt(LitInt),
-    UnaryExpr {op: UnaryOp, expr: Box<Expr>},
-    BinaryExpr {op: BinaryOp, lhs: Box<Expr>, rhs: Box<Expr>},
+    UnaryExpr {
+        op: UnaryOp,
+        expr: Box<Expr>,
+    },
+    BinaryExpr {
+        op: BinaryOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
 }
 
 #[derive(Debug)]
@@ -67,6 +74,31 @@ pub enum Stmt {
     Continue,
 }
 
+#[derive(Debug)]
+pub enum InitExpr {
+    Scalar(Expr),
+    Array(Vec<InitExpr>),
+}
+
+#[derive(Debug)]
+pub struct VarDef {
+    pub name: Ident,
+    pub shape: Vec<Expr>,
+    pub init: Option<InitExpr>,
+}
+
+#[derive(Debug)]
+pub struct VarDecl {
+    pub base_ty: BaseType,
+    pub vars: Vec<VarDef>,
+}
+
+#[derive(Debug)]
+pub enum Decl {
+    Var(VarDecl),
+    Const(VarDecl),
+}
+
 impl Into<BlockItem> for Stmt {
     fn into(self) -> BlockItem {
         BlockItem::Stmt(self)
@@ -76,15 +108,15 @@ impl Into<BlockItem> for Stmt {
 #[derive(Debug)]
 pub enum BlockItem {
     Stmt(Stmt),
+    Decl(Decl),
 }
-
 
 #[derive(Debug)]
 pub struct Block(pub Vec<BlockItem>);
 
 #[derive(Debug)]
 pub struct FuncDef {
-    pub ret_type: BaseType,
+    pub ret_ty: BaseType,
     pub name: Ident,
     pub params: Vec<(BaseType, Ident)>,
     pub body: Block,
@@ -93,7 +125,8 @@ pub struct FuncDef {
 #[derive(Debug)]
 pub enum TransUnitItem {
     FuncDef(FuncDef),
-    // TODO: Decl
+    Decl(Decl),
 }
 
+#[derive(Debug)]
 pub struct TransUnit(pub Vec<TransUnitItem>);

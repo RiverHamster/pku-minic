@@ -47,7 +47,14 @@ pub Expr: ast::Expr = {
     #[precedence(level="0")]
     <t: Term> => t,
 
-    #[precedence(level="1")]
+    #[precedence(level="1")] #[assoc(side="left")]
+    <e: Expr> "[" <i: Expr> "]" => ast::Expr::BinaryExpr {
+        op: ast::BinaryOp::Index,
+        lhs: Box::new(e),
+        rhs: Box::new(i),
+    },
+
+    #[precedence(level="2")] #[assoc(side="right")]
     "+" <e: Expr> => ast::Expr::UnaryExpr{
         op: ast::UnaryOp::Pos,
         expr: Box::new(e),
@@ -155,7 +162,7 @@ pub BaseType: ast::BaseType = {
 
 pub BlockItem: ast::BlockItem = {
     <s: Stmt> => ast::BlockItem::Stmt(s),
-    // TODO: Decl
+    <d: Decl> => ast::BlockItem::Decl(d),
 }
 
 pub Block: ast::Block = {
@@ -172,10 +179,54 @@ pub Stmt: ast::Stmt = {
     // TODO: if, else, while, assignment
 }
 
+pub SingleDim: ast::Expr = {
+    "[" <e: Expr> "]" => e,
+}
+
+pub InitExpr: ast::InitExpr = {
+    <e: Expr> => ast::InitExpr::Scalar(e),
+    "{" <mut es: (<InitExpr> ",")*> <e: InitExpr?> "}" => {
+        if let Some(e) = e {
+            es.push(e);
+        }
+        ast::InitExpr::Array(es)
+    }
+}
+
+pub VarDef: ast::VarDef = {
+    <name: Ident> <shape: SingleDim*> => ast::VarDef {
+        name: name,
+        shape: shape,
+        init: None,
+    },
+    <name: Ident> <shape: SingleDim*> "=" <init: InitExpr> => ast::VarDef {
+        name: name,
+        shape: shape,
+        init: Some(init),
+    },
+}
+
+pub VarDecl: ast::VarDecl = {
+    <t: BaseType> <mut vds: (<VarDef> ",")*> <vd: VarDef?> ";" => ast::VarDecl {
+        base_ty: t,
+        vars: {
+            if let Some(vd) = vd {
+                vds.push(vd);
+            }
+            vds
+        }
+    }
+}
+
+pub Decl: ast::Decl = {
+    <v: VarDecl> => ast::Decl::Var(v),
+    "const" <v: VarDecl> => ast::Decl::Const(v),
+}
+
 // TODO: parameters
 pub FuncDef: ast::FuncDef = {
     <t: BaseType> <name: Ident> "(" ")" <b: Block> => ast::FuncDef{
-        ret_type: t,
+        ret_ty: t,
         name: name,
         params: vec![],
         body: b,
@@ -184,6 +235,7 @@ pub FuncDef: ast::FuncDef = {
 
 pub TransUnitItem: ast::TransUnitItem = {
     <f: FuncDef> => ast::TransUnitItem::FuncDef(f),
+    <d: Decl> => ast::TransUnitItem::Decl(d),
 }
 
 pub TransUnit: ast::TransUnit = {

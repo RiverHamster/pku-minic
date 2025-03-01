@@ -13,10 +13,17 @@ fn main() {
     }
 
     let source = fs::read_to_string(&conf.inputs[0]).unwrap();
+    let output_file = fs::File::create(&conf.output).unwrap();
     let parser = sysy::parser::TransUnitParser::new();
     let ast = parser.parse(&source).unwrap();
+
+    if conf.output_type == cli::OutputType::AST {
+        println!("{:?}", ast);
+        return;
+    }
+
     let ir_program = irgen::gen_ir(&ast);
-    let output_file = fs::File::create(&conf.output).unwrap();
+
     if conf.output_type == cli::OutputType::Koopa {
         let mut koopa_gen = koopa::back::Generator::with_visitor(output_file, koopa::back::koopa::Visitor::default());
         koopa_gen.generate_on(&ir_program).expect("Failed to dump Koopa IR");

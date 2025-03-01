@@ -1,6 +1,7 @@
 #[derive(Debug, PartialEq, Eq)]
 pub enum OutputType {
     Unknown,
+    AST,
     Koopa,
     RISCV,
 }
@@ -30,6 +31,14 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
                 assert!(!output_specified, "Multiple output files specified");
                 conf.output = args.next().expect("No output file specified");
                 output_specified = true;
+            }
+            "-ast" => {
+                assert_eq!(
+                    conf.output_type,
+                    OutputType::Unknown,
+                    "Duplicate output type"
+                );
+                conf.output_type = OutputType::AST;
             }
             "-koopa" => {
                 assert_eq!(

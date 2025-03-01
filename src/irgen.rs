@@ -167,7 +167,8 @@ impl IRBuilder {
                     if let ast::Stmt::Return(_) = stmt {
                         break;
                     }
-                }
+                },
+                ast::BlockItem::Decl(_) => unimplemented!(),
             }
         }
     }
@@ -177,7 +178,7 @@ impl IRBuilder {
         let f_handle = self.prog.new_func(FunctionData::with_param_names(
             String::from("@") + &f.name.0,
             vec![],
-            match f.ret_type {
+            match f.ret_ty {
                 ast::BaseType::Int => Type::get_i32(),
                 ast::BaseType::Void => Type::get_unit(),
             },
@@ -190,6 +191,7 @@ impl IRBuilder {
         for item in ast.0.iter() {
             match item {
                 ast::TransUnitItem::FuncDef(f) => self.add_func(&f),
+                ast::TransUnitItem::Decl(d) => unimplemented!(),
             }
         }
         self.prog

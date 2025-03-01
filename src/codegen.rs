@@ -1,6 +1,6 @@
 use core::panic;
 use koopa::ir::{dfg::DataFlowGraph, *};
-use std::{any::Any, collections::HashMap, hash::Hash, io};
+use std::{collections::HashMap, io};
 
 struct SimpleRISCVBuilder<W: io::Write> {
     writer: W,
