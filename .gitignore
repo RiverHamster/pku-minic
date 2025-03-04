@@ -1,3 +1,4 @@
 /target
 example/c/*.koopa
 example/c/*.s
+example/c/*.ast
