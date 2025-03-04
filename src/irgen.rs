@@ -151,7 +151,7 @@ impl IRBuilder {
         }
     }
 
-    fn eval_i32_const(&self, dfg: &DataFlowGraph, e: &ast::Expr) -> i32 {
+    fn eval_i32_const(&self, e: &ast::Expr) -> i32 {
         use SymbolTableEntry::*;
         match e {
             Expr::LitInt(i) => i.0,
@@ -161,7 +161,7 @@ impl IRBuilder {
                 None => panic!("undefined symbol: {}", i.0),
             },
             Expr::UnaryExpr { op, expr } => {
-                let val = self.eval_i32_const(dfg, expr);
+                let val = self.eval_i32_const(expr);
                 match op {
                     ast::UnaryOp::Neg => -val,
                     ast::UnaryOp::LNot => (val != 0) as i32,
@@ -169,8 +169,8 @@ impl IRBuilder {
                 }
             }
             Expr::BinaryExpr { op, lhs, rhs } => {
-                let lhs = self.eval_i32_const(dfg, lhs);
-                let rhs = self.eval_i32_const(dfg, rhs);
+                let lhs = self.eval_i32_const(lhs);
+                let rhs = self.eval_i32_const(rhs);
                 match op {
                     ast::BinaryOp::Add => lhs + rhs,
                     ast::BinaryOp::Sub => lhs - rhs,
@@ -265,7 +265,7 @@ impl IRBuilder {
                             for v in vars {
                                 let val = match &v.init {
                                     Some(ast::InitExpr::Scalar(e)) => {
-                                        self.eval_i32_const(self.prog.func(f_handle).dfg(), e)
+                                        self.eval_i32_const(e)
                                     }
                                     Some(ast::InitExpr::Array(_)) => unimplemented!(),
                                     None => panic!("const {} uninitialized", v.name.0),
