@@ -1,11 +1,11 @@
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum UnaryOp {
     Pos,
     Neg,
     LNot,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -23,7 +23,7 @@ pub enum BinaryOp {
     Index,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Ident(pub String);
 
 impl Into<Expr> for Ident {
@@ -32,7 +32,7 @@ impl Into<Expr> for Ident {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct LitInt(pub i32);
 
 impl Into<Expr> for LitInt {
@@ -41,7 +41,7 @@ impl Into<Expr> for LitInt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     Ident(Ident),
     LitInt(LitInt),
@@ -56,13 +56,13 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum BaseType {
     Int,
     Void,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Stmt {
     Assign(Expr, Expr),
     Expr(Expr),
@@ -75,26 +75,26 @@ pub enum Stmt {
     Empty,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum InitExpr {
     Scalar(Expr),
     Array(Vec<InitExpr>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VarDef {
     pub name: Ident,
     pub shape: Vec<Expr>,
     pub init: Option<InitExpr>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VarDecl {
     pub base_ty: BaseType,
     pub vars: Vec<VarDef>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Decl {
     Var(VarDecl),
     Const(VarDecl),
@@ -106,16 +106,16 @@ impl Into<BlockItem> for Stmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BlockItem {
     Stmt(Stmt),
     Decl(Decl),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Block(pub Vec<BlockItem>);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FuncDef {
     pub ret_ty: BaseType,
     pub name: Ident,
@@ -123,11 +123,11 @@ pub struct FuncDef {
     pub body: Block,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TransUnitItem {
     FuncDef(FuncDef),
     Decl(Decl),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TransUnit(pub Vec<TransUnitItem>);
