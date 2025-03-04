@@ -19,6 +19,24 @@ pub struct IRBuilder {
     syms: HashMap<String, SymbolTableEntry>,
 }
 
+macro_rules! add_insn {
+    ($module:ident, $f_handle:expr, $bb:expr, $insn:expr) => {
+        $module
+            .prog
+            .func_mut($f_handle)
+            .layout_mut()
+            .bb_mut($bb)
+            .insts_mut()
+            .extend($insn);
+    };
+}
+
+macro_rules! new_value {
+    ($module:ident, $f_handle:expr) => {
+        $module.prog.func_mut($f_handle).dfg_mut().new_value()
+    };
+}
+
 impl IRBuilder {
     pub fn new() -> Self {
         Self {
@@ -31,44 +49,24 @@ impl IRBuilder {
     // TODO: type information
     fn eval_expr(&mut self, f_handle: Function, bb: BasicBlock, e: &ast::Expr) -> Value {
         // let dfg = self.prog.func(f_handle).dfg_mut();
-        let zero = self
-            .prog
-            .func_mut(f_handle)
-            .dfg_mut()
-            .new_value()
-            .integer(0);
+        let zero = new_value!(self, f_handle).integer(0);
         match e {
-            Expr::LitInt(i) => self
-                .prog
-                .func_mut(f_handle)
-                .dfg_mut()
-                .new_value()
-                .integer(i.0),
+            Expr::LitInt(i) => new_value!(self, f_handle).integer(i.0),
             Expr::UnaryExpr { op, expr } => {
                 let expr_val = self.eval_expr(f_handle, bb, expr);
                 let insn = match op {
-                    ast::UnaryOp::Neg => self.prog.func_mut(f_handle).dfg_mut().new_value().binary(
-                        BinaryOp::Sub,
-                        zero,
-                        expr_val,
-                    ),
-                    ast::UnaryOp::LNot => self
-                        .prog
-                        .func_mut(f_handle)
-                        .dfg_mut()
-                        .new_value()
-                        .binary(BinaryOp::Eq, zero, expr_val),
+                    ast::UnaryOp::Neg => {
+                        new_value!(self, f_handle).binary(BinaryOp::Sub, zero, expr_val)
+                    }
+                    ast::UnaryOp::LNot => {
+                        new_value!(self, f_handle).binary(BinaryOp::Eq, zero, expr_val)
+                    }
                     ast::UnaryOp::Pos => expr_val,
                 };
 
                 // dummy operator does not generate instructions
                 if *op != ast::UnaryOp::Pos {
-                    self.prog
-                        .func_mut(f_handle)
-                        .layout_mut()
-                        .bb_mut(bb)
-                        .insts_mut()
-                        .extend([insn]);
+                    add_insn!(self, f_handle, bb, [insn]);
                 }
 
                 insn
@@ -98,65 +96,28 @@ impl IRBuilder {
 
                 // TODO: short-circuiting
                 if *op == LAnd || *op == LOr {
-                    let lhs_logical = self.prog.func_mut(f_handle).dfg_mut().new_value().binary(
-                        BinaryOp::NotEq,
-                        zero,
-                        lhs_val,
-                    );
-                    let rhs_logical = self.prog.func_mut(f_handle).dfg_mut().new_value().binary(
-                        BinaryOp::NotEq,
-                        zero,
-                        rhs_val,
-                    );
-                    self.prog
-                        .func_mut(f_handle)
-                        .layout_mut()
-                        .bb_mut(bb)
-                        .insts_mut()
-                        .extend([lhs_logical, rhs_logical]);
+                    let lhs_logical =
+                        new_value!(self, f_handle).binary(BinaryOp::NotEq, zero, lhs_val);
+                    let rhs_logical =
+                        new_value!(self, f_handle).binary(BinaryOp::NotEq, zero, rhs_val);
+                    add_insn!(self, f_handle, bb, [lhs_logical, rhs_logical]);
 
                     lhs_val = lhs_logical;
                     rhs_val = rhs_logical;
                 }
 
-                let insn = self
-                    .prog
-                    .func_mut(f_handle)
-                    .dfg_mut()
-                    .new_value()
-                    .binary(ir_op, lhs_val, rhs_val);
-
-                self.prog
-                    .func_mut(f_handle)
-                    .layout_mut()
-                    .bb_mut(bb)
-                    .insts_mut()
-                    .extend([insn]);
+                let insn = new_value!(self, f_handle).binary(ir_op, lhs_val, rhs_val);
+                add_insn!(self, f_handle, bb, [insn]);
                 insn
             }
             Expr::Ident(ident) => {
                 use SymbolTableEntry::*;
                 match self.syms.get(&ident.0) {
-                    Some(Const(i)) => self
-                        .prog
-                        .func_mut(f_handle)
-                        .dfg_mut()
-                        .new_value()
-                        .integer(*i),
+                    Some(Const(i)) => new_value!(self, f_handle).integer(*i),
                     // Some(Global(val)) => *val,
                     Some(Var(val)) => {
-                        let loaded = self
-                            .prog
-                            .func_mut(f_handle)
-                            .dfg_mut()
-                            .new_value()
-                            .load(*val);
-                        self.prog
-                            .func_mut(f_handle)
-                            .layout_mut()
-                            .bb_mut(bb)
-                            .insts_mut()
-                            .extend([loaded]);
+                        let loaded = new_value!(self, f_handle).load(*val);
+                        add_insn!(self, f_handle, bb, [loaded]);
                         loaded
                     }
                     None => panic!("undefined symbol: {}", ident.0),
@@ -209,18 +170,8 @@ impl IRBuilder {
         match b {
             ast::Stmt::Return(ret) => {
                 let ret_eval = ret.as_ref().map(|e| self.eval_expr(f_handle, bb, e));
-                let ret = self
-                    .prog
-                    .func_mut(f_handle)
-                    .dfg_mut()
-                    .new_value()
-                    .ret(ret_eval);
-                self.prog
-                    .func_mut(f_handle)
-                    .layout_mut()
-                    .bb_mut(bb)
-                    .insts_mut()
-                    .extend([ret]);
+                let ret = new_value!(self, f_handle).ret(ret_eval);
+                add_insn!(self, f_handle, bb, [ret]);
             }
             ast::Stmt::Assign(lhs, rhs) => match lhs {
                 ast::Expr::Ident(ident) => {
@@ -231,18 +182,8 @@ impl IRBuilder {
                         .clone();
                     let rval = self.eval_expr(f_handle, bb, rhs).clone();
                     if let SymbolTableEntry::Var(var) = lval_entry {
-                        let store = self
-                            .prog
-                            .func_mut(f_handle)
-                            .dfg_mut()
-                            .new_value()
-                            .store(rval, var);
-                        self.prog
-                            .func_mut(f_handle)
-                            .layout_mut()
-                            .bb_mut(bb)
-                            .insts_mut()
-                            .extend([store]);
+                        let store = new_value!(self, f_handle).store(rval, var);
+                        add_insn!(self, f_handle, bb, [store]);
                     } else {
                         panic!("assign to non-lvalue");
                     }
@@ -256,7 +197,7 @@ impl IRBuilder {
             },
             ast::Stmt::Block(b) => {
                 self.add_block(f_handle, Some(bb), b);
-            },
+            }
             ast::Stmt::Empty => {}
             // TODO: Expr may have side effects
             ast::Stmt::Expr(_) => {
@@ -344,14 +285,8 @@ impl IRBuilder {
                             let ty = v.shape.iter().rev().fold(base_ty, |ty, dim_expr| {
                                 Type::get_array(ty, self.eval_i32_const(dim_expr) as usize)
                             });
-                            let alloc =
-                                self.prog.func_mut(f_handle).dfg_mut().new_value().alloc(ty);
-                            self.prog
-                                .func_mut(f_handle)
-                                .layout_mut()
-                                .bb_mut(bb)
-                                .insts_mut()
-                                .extend([alloc]);
+                            let alloc = new_value!(self, f_handle).alloc(ty);
+                            add_insn!(self, f_handle, bb, [alloc]);
                             self.syms
                                 .insert(v.name.0.clone(), SymbolTableEntry::Var(alloc));
                             if let Some(init) = &v.init {
