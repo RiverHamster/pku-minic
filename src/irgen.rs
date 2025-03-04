@@ -231,7 +231,7 @@ impl IRBuilder {
                         .clone();
                     let rval = self.eval_expr(f_handle, bb, rhs).clone();
                     if let SymbolTableEntry::Var(var) = lval_entry {
-                       let store = self
+                        let store = self
                             .prog
                             .func_mut(f_handle)
                             .dfg_mut()
@@ -254,25 +254,40 @@ impl IRBuilder {
                 } => unimplemented!("array index assign"),
                 _ => panic!("assign to non-lvalue"),
             },
+            ast::Stmt::Block(b) => {
+                self.add_block(f_handle, Some(bb), b);
+            },
+            ast::Stmt::Empty => {}
+            // TODO: Expr may have side effects
+            ast::Stmt::Expr(_) => {
+                eprintln!("WARN: side effects in expr statement");
+            }
             // TODO: other stmts
             _ => unimplemented!("statement {:?} unimplemented", b),
         }
     }
 
-    fn add_block(&mut self, f_handle: Function, b: &ast::Block) {
-        // let f_data = self.prog.func_mut(f_handle);
-        let bb = self
-            .prog
-            .func_mut(f_handle)
-            .dfg_mut()
-            .new_bb()
-            .basic_block(Some(String::from("%") + &self.bb_idx.to_string()));
-        self.prog
-            .func_mut(f_handle)
-            .layout_mut()
-            .bbs_mut()
-            .extend([bb]);
-        self.bb_idx += 1;
+    fn add_block(
+        &mut self,
+        f_handle: Function,
+        bb: Option<BasicBlock>,
+        b: &ast::Block,
+    ) -> BasicBlock {
+        let bb = bb.unwrap_or_else(|| {
+            let bb = self
+                .prog
+                .func_mut(f_handle)
+                .dfg_mut()
+                .new_bb()
+                .basic_block(Some(String::from("%") + &self.bb_idx.to_string()));
+            self.prog
+                .func_mut(f_handle)
+                .layout_mut()
+                .bbs_mut()
+                .extend([bb]);
+            self.bb_idx += 1;
+            bb
+        });
         let ast::Block(items) = b;
 
         // save the possibly replaced symbols
@@ -331,7 +346,12 @@ impl IRBuilder {
                             });
                             let alloc =
                                 self.prog.func_mut(f_handle).dfg_mut().new_value().alloc(ty);
-                            self.prog.func_mut(f_handle).layout_mut().bb_mut(bb).insts_mut().extend([alloc]);
+                            self.prog
+                                .func_mut(f_handle)
+                                .layout_mut()
+                                .bb_mut(bb)
+                                .insts_mut()
+                                .extend([alloc]);
                             self.syms
                                 .insert(v.name.0.clone(), SymbolTableEntry::Var(alloc));
                             if let Some(init) = &v.init {
@@ -363,6 +383,8 @@ impl IRBuilder {
                 self.syms.remove(name);
             }
         }
+
+        bb
     }
 
     fn add_func(&mut self, f: &ast::FuncDef) {
@@ -376,7 +398,7 @@ impl IRBuilder {
             },
         ));
 
-        self.add_block(f_handle, &f.body);
+        self.add_block(f_handle, None, &f.body);
     }
 
     pub fn parse(mut self, ast: &ast::TransUnit) -> Program {
