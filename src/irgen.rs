@@ -2,13 +2,13 @@ use crate::sysy::ast::{self, Expr};
 use core::panic;
 use std::collections::HashMap;
 
-use koopa::ir::{builder_traits::*, dfg::DataFlowGraph, *};
+use koopa::ir::{builder_traits::*, *};
 
 #[derive(Debug, Clone, Copy)]
 enum SymbolTableEntry {
     Const(i32),
-    Global(Value),
-    Local(Value),
+    // Alloc Value, which stores the variable
+    Var(Value),
 }
 
 /// global states for processing the AST
@@ -28,6 +28,7 @@ impl IRBuilder {
         }
     }
 
+    // TODO: type information
     fn eval_expr(&mut self, f_handle: Function, bb: BasicBlock, e: &ast::Expr) -> Value {
         // let dfg = self.prog.func(f_handle).dfg_mut();
         let zero = self
@@ -142,9 +143,22 @@ impl IRBuilder {
                         .dfg_mut()
                         .new_value()
                         .integer(*i),
-                    Some(_) => unimplemented!("ref non-const"),
                     // Some(Global(val)) => *val,
-                    // Some(Local(val)) => *val,
+                    Some(Var(val)) => {
+                        let loaded = self
+                            .prog
+                            .func_mut(f_handle)
+                            .dfg_mut()
+                            .new_value()
+                            .load(*val);
+                        self.prog
+                            .func_mut(f_handle)
+                            .layout_mut()
+                            .bb_mut(bb)
+                            .insts_mut()
+                            .extend([loaded]);
+                        loaded
+                    }
                     None => panic!("undefined symbol: {}", ident.0),
                 }
             }
@@ -208,6 +222,38 @@ impl IRBuilder {
                     .insts_mut()
                     .extend([ret]);
             }
+            ast::Stmt::Assign(lhs, rhs) => match lhs {
+                ast::Expr::Ident(ident) => {
+                    let lval_entry = self
+                        .syms
+                        .get(&ident.0)
+                        .expect(&format!("undefined symbol: {}", ident.0))
+                        .clone();
+                    let rval = self.eval_expr(f_handle, bb, rhs).clone();
+                    if let SymbolTableEntry::Var(var) = lval_entry {
+                       let store = self
+                            .prog
+                            .func_mut(f_handle)
+                            .dfg_mut()
+                            .new_value()
+                            .store(rval, var);
+                        self.prog
+                            .func_mut(f_handle)
+                            .layout_mut()
+                            .bb_mut(bb)
+                            .insts_mut()
+                            .extend([store]);
+                    } else {
+                        panic!("assign to non-lvalue");
+                    }
+                }
+                ast::Expr::BinaryExpr {
+                    op: ast::BinaryOp::Index,
+                    lhs: base,
+                    rhs: index,
+                } => unimplemented!("array index assign"),
+                _ => panic!("assign to non-lvalue"),
+            },
             // TODO: other stmts
             _ => unimplemented!(),
         }
@@ -264,9 +310,7 @@ impl IRBuilder {
                         } => {
                             for v in vars {
                                 let val = match &v.init {
-                                    Some(ast::InitExpr::Scalar(e)) => {
-                                        self.eval_i32_const(e)
-                                    }
+                                    Some(ast::InitExpr::Scalar(e)) => self.eval_i32_const(e),
                                     Some(ast::InitExpr::Array(_)) => unimplemented!(),
                                     None => panic!("const {} uninitialized", v.name.0),
                                 };
@@ -276,11 +320,42 @@ impl IRBuilder {
                         }
                         _ => panic!("base_ty of Decl must be int"),
                     },
-                    ast::Decl::Var(d) => unimplemented!("VarDecl"),
+                    ast::Decl::Var(d) => {
+                        for v in &d.vars {
+                            let base_ty = match d.base_ty {
+                                ast::BaseType::Int => Type::get_i32(),
+                                ast::BaseType::Void => Type::get_unit(),
+                            };
+                            let ty = v.shape.iter().rev().fold(base_ty, |ty, dim_expr| {
+                                Type::get_array(ty, self.eval_i32_const(dim_expr) as usize)
+                            });
+                            let alloc =
+                                self.prog.func_mut(f_handle).dfg_mut().new_value().alloc(ty);
+                            self.prog.func_mut(f_handle).layout_mut().bb_mut(bb).insts_mut().extend([alloc]);
+                            self.syms
+                                .insert(v.name.0.clone(), SymbolTableEntry::Var(alloc));
+                            if let Some(init) = &v.init {
+                                match init {
+                                    ast::InitExpr::Scalar(e) => {
+                                        self.add_stmt(
+                                            f_handle,
+                                            bb,
+                                            &ast::Stmt::Assign(
+                                                ast::Expr::Ident(v.name.clone()),
+                                                e.clone(),
+                                            ),
+                                        );
+                                    }
+                                    ast::InitExpr::Array(e) => unimplemented!("array init"),
+                                }
+                            }
+                        }
+                    }
                 },
             }
         }
 
+        // roll back to the last frame
         for (name, val) in sym_backup {
             if let Some(val) = val {
                 self.syms.get_mut(name).map(|v| *v = val);
