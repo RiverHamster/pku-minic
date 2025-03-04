@@ -87,6 +87,18 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                     }
                     // pre-allocated
                     ValueKind::Alloc(_) => {}
+                    ValueKind::Load(l) => {
+                        let src_off = stk_var.get(l.src(), dfg);
+                        let pos = stk_val.get(*val_handle, dfg);
+                        writeln!(self.writer, "  lw t0, {src_off}(sp)").unwrap();
+                        writeln!(self.writer, "  sw t0, {pos}(sp)").unwrap();
+                    }
+                    ValueKind::Store(s) => {
+                        let src_off = stk_val.get(s.value(), dfg);
+                        let dst_off = stk_var.get(s.dest(), dfg);
+                        writeln!(self.writer, "  lw t0, {src_off}(sp)").unwrap();
+                        writeln!(self.writer, "  sw t0, {dst_off}(sp)").unwrap();
+                    }
                     ValueKind::Return(r) => {
                         if let Some(v) = r.value() {
                             let pos = stk_val.get(v, dfg);

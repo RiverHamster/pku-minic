@@ -255,7 +255,7 @@ impl IRBuilder {
                 _ => panic!("assign to non-lvalue"),
             },
             // TODO: other stmts
-            _ => unimplemented!(),
+            _ => unimplemented!("statement {:?} unimplemented", b),
         }
     }
 
