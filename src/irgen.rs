@@ -1,12 +1,22 @@
 use crate::sysy::ast::{self, Expr};
+use core::panic;
 use std::collections::HashMap;
 
-use koopa::ir::{builder_traits::*, *};
+use koopa::ir::{builder_traits::*, dfg::DataFlowGraph, *};
 
+#[derive(Debug, Clone, Copy)]
+enum SymbolTableEntry {
+    Const(i32),
+    Global(Value),
+    Local(Value),
+}
+
+/// global states for processing the AST
 pub struct IRBuilder {
     prog: Program,
     bb_idx: usize,
-    syms: HashMap<String, Value>,
+    // constants maps to integers, and variables maps to pointers
+    syms: HashMap<String, SymbolTableEntry>,
 }
 
 impl IRBuilder {
@@ -53,11 +63,11 @@ impl IRBuilder {
                 // dummy operator does not generate instructions
                 if *op != ast::UnaryOp::Pos {
                     self.prog
-                    .func_mut(f_handle)
-                    .layout_mut()
-                    .bb_mut(bb)
-                    .insts_mut()
-                    .extend([insn]);
+                        .func_mut(f_handle)
+                        .layout_mut()
+                        .bb_mut(bb)
+                        .insts_mut()
+                        .extend([insn]);
                 }
 
                 insn
@@ -121,10 +131,63 @@ impl IRBuilder {
                     .bb_mut(bb)
                     .insts_mut()
                     .extend([insn]);
-
                 insn
             }
-            Expr::Ident(ident) => unimplemented!(),
+            Expr::Ident(ident) => {
+                use SymbolTableEntry::*;
+                match self.syms.get(&ident.0) {
+                    Some(Const(i)) => self
+                        .prog
+                        .func_mut(f_handle)
+                        .dfg_mut()
+                        .new_value()
+                        .integer(*i),
+                    Some(_) => unimplemented!("ref non-const"),
+                    // Some(Global(val)) => *val,
+                    // Some(Local(val)) => *val,
+                    None => panic!("undefined symbol: {}", ident.0),
+                }
+            }
+        }
+    }
+
+    fn eval_i32_const(&self, dfg: &DataFlowGraph, e: &ast::Expr) -> i32 {
+        use SymbolTableEntry::*;
+        match e {
+            Expr::LitInt(i) => i.0,
+            Expr::Ident(i) => match self.syms.get(&i.0) {
+                Some(Const(v)) => *v,
+                Some(_) => panic!("symbol {} is not a constant", i.0),
+                None => panic!("undefined symbol: {}", i.0),
+            },
+            Expr::UnaryExpr { op, expr } => {
+                let val = self.eval_i32_const(dfg, expr);
+                match op {
+                    ast::UnaryOp::Neg => -val,
+                    ast::UnaryOp::LNot => (val != 0) as i32,
+                    ast::UnaryOp::Pos => val,
+                }
+            }
+            Expr::BinaryExpr { op, lhs, rhs } => {
+                let lhs = self.eval_i32_const(dfg, lhs);
+                let rhs = self.eval_i32_const(dfg, rhs);
+                match op {
+                    ast::BinaryOp::Add => lhs + rhs,
+                    ast::BinaryOp::Sub => lhs - rhs,
+                    ast::BinaryOp::Mul => lhs * rhs,
+                    ast::BinaryOp::Div => lhs / rhs,
+                    ast::BinaryOp::Mod => lhs % rhs,
+                    ast::BinaryOp::Lt => (lhs < rhs) as i32,
+                    ast::BinaryOp::Gt => (lhs > rhs) as i32,
+                    ast::BinaryOp::Leq => (lhs <= rhs) as i32,
+                    ast::BinaryOp::Geq => (lhs >= rhs) as i32,
+                    ast::BinaryOp::Eq => (lhs == rhs) as i32,
+                    ast::BinaryOp::Neq => (lhs != rhs) as i32,
+                    ast::BinaryOp::LAnd => (lhs != 0 && rhs != 0) as i32,
+                    ast::BinaryOp::LOr => (lhs != 0 || rhs != 0) as i32,
+                    ast::BinaryOp::Index => unimplemented!(),
+                }
+            }
         }
     }
 
@@ -151,14 +214,39 @@ impl IRBuilder {
     }
 
     fn add_block(&mut self, f_handle: Function, b: &ast::Block) {
-        let f_data = self.prog.func_mut(f_handle);
-        let bb = f_data
+        // let f_data = self.prog.func_mut(f_handle);
+        let bb = self
+            .prog
+            .func_mut(f_handle)
             .dfg_mut()
             .new_bb()
             .basic_block(Some(String::from("%") + &self.bb_idx.to_string()));
-        f_data.layout_mut().bbs_mut().extend([bb]);
+        self.prog
+            .func_mut(f_handle)
+            .layout_mut()
+            .bbs_mut()
+            .extend([bb]);
         self.bb_idx += 1;
         let ast::Block(items) = b;
+
+        // save the possibly replaced symbols
+        let sym_backup = items
+            .iter()
+            .filter_map(|item| match item {
+                ast::BlockItem::Decl(d) => {
+                    let vars = match d {
+                        ast::Decl::Var(v) => &v.vars,
+                        ast::Decl::Const(v) => &v.vars,
+                    };
+                    Some(
+                        vars.iter()
+                            .map(|v| (&v.name.0, self.syms.get(&v.name.0).copied())),
+                    )
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
 
         for item in items {
             match item {
@@ -167,8 +255,37 @@ impl IRBuilder {
                     if let ast::Stmt::Return(_) = stmt {
                         break;
                     }
+                }
+                ast::BlockItem::Decl(decl) => match decl {
+                    ast::Decl::Const(d) => match d {
+                        ast::VarDecl {
+                            base_ty: ast::BaseType::Int,
+                            vars,
+                        } => {
+                            for v in vars {
+                                let val = match &v.init {
+                                    Some(ast::InitExpr::Scalar(e)) => {
+                                        self.eval_i32_const(self.prog.func(f_handle).dfg(), e)
+                                    }
+                                    Some(ast::InitExpr::Array(_)) => unimplemented!(),
+                                    None => panic!("const {} uninitialized", v.name.0),
+                                };
+                                self.syms
+                                    .insert(v.name.0.clone(), SymbolTableEntry::Const(val));
+                            }
+                        }
+                        _ => panic!("base_ty of Decl must be int"),
+                    },
+                    ast::Decl::Var(d) => unimplemented!("VarDecl"),
                 },
-                ast::BlockItem::Decl(_) => unimplemented!(),
+            }
+        }
+
+        for (name, val) in sym_backup {
+            if let Some(val) = val {
+                self.syms.get_mut(name).map(|v| *v = val);
+            } else {
+                self.syms.remove(name);
             }
         }
     }

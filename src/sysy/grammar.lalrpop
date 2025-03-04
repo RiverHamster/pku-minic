@@ -176,7 +176,9 @@ pub Stmt: ast::Stmt = {
     "return" ";" => ast::Stmt::Return(None),
     <e: Expr> ";" => ast::Stmt::Expr(e),
     <b: Block> => ast::Stmt::Block(Box::new(b)),
-    // TODO: if, else, while, assignment
+    <l: Expr> "=" <r: Expr> ";" => ast::Stmt::Assign(l, r),
+    ";" => ast::Stmt::Empty,
+    // TODO: if, else, while
 }
 
 pub SingleDim: ast::Expr = {

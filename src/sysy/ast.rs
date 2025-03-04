@@ -64,7 +64,7 @@ pub enum BaseType {
 
 #[derive(Debug)]
 pub enum Stmt {
-    // TODO: Assignment
+    Assign(Expr, Expr),
     Expr(Expr),
     Return(Option<Expr>),
     Block(Box<Block>),
@@ -72,6 +72,7 @@ pub enum Stmt {
     While(Expr, Box<Stmt>),
     Break,
     Continue,
+    Empty,
 }
 
 #[derive(Debug)]
