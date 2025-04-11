@@ -37,6 +37,26 @@ macro_rules! new_value {
     };
 }
 
+macro_rules! add_bb {
+    ($module:ident, $f_handle:expr) => { {
+        let bb = $module
+            .prog
+            .func_mut($f_handle)
+            .dfg_mut()
+            .new_bb()
+            .basic_block(Some(String::from("%") + &$module.bb_idx.to_string()));
+        $module
+            .prog
+            .func_mut($f_handle)
+            .layout_mut()
+            .bbs_mut()
+            .extend([bb]);
+        $module.bb_idx += 1;
+        bb
+    }
+    };
+}
+
 impl IRBuilder {
     pub fn new() -> Self {
         Self {
@@ -166,12 +186,15 @@ impl IRBuilder {
         }
     }
 
-    fn add_stmt(&mut self, f_handle: Function, bb: BasicBlock, b: &ast::Stmt) {
+    /// Append a statement to the current open basic block `bb`.
+    /// Return the open basic blocks.
+    fn add_stmt(&mut self, f_handle: Function, bb: BasicBlock, b: &ast::Stmt) -> Vec<BasicBlock> {
         match b {
             ast::Stmt::Return(ret) => {
                 let ret_eval = ret.as_ref().map(|e| self.eval_expr(f_handle, bb, e));
                 let ret = new_value!(self, f_handle).ret(ret_eval);
                 add_insn!(self, f_handle, bb, [ret]);
+                vec![]
             }
             ast::Stmt::Assign(lhs, rhs) => match lhs {
                 ast::Expr::Ident(ident) => {
@@ -187,6 +210,7 @@ impl IRBuilder {
                     } else {
                         panic!("assign to non-lvalue");
                     }
+                    vec![bb]
                 }
                 ast::Expr::BinaryExpr {
                     op: ast::BinaryOp::Index,
@@ -196,12 +220,24 @@ impl IRBuilder {
                 _ => panic!("assign to non-lvalue"),
             },
             ast::Stmt::Block(b) => {
-                self.add_block(f_handle, Some(bb), b);
+                self.add_block(f_handle, Some(bb), b)
             }
-            ast::Stmt::Empty => {}
+            ast::Stmt::Empty => vec![bb],
             // TODO: Expr may have side effects
             ast::Stmt::Expr(_) => {
                 eprintln!("WARN: side effects in expr statement");
+                vec![bb]
+            }
+            ast::Stmt::If(cond, then_stmt, else_stmt) => {
+                let cond_val = self.eval_expr(f_handle, bb, cond);
+                let then_bb = add_bb!(self, f_handle);
+                let else_bb = add_bb!(self, f_handle);
+                let then_open = self.add_stmt(f_handle, then_bb, then_stmt);
+                let else_open = self.add_stmt(f_handle, else_bb, else_stmt);
+                let branch = new_value!(self, f_handle).branch(cond_val, then_bb, else_bb);
+                add_insn!(self, f_handle, bb, [branch]);
+
+                then_open.into_iter().chain(else_open.into_iter()).collect()
             }
             // TODO: other stmts
             _ => unimplemented!("statement {:?} unimplemented", b),
@@ -213,22 +249,9 @@ impl IRBuilder {
         f_handle: Function,
         bb: Option<BasicBlock>,
         b: &ast::Block,
-    ) -> BasicBlock {
-        let bb = bb.unwrap_or_else(|| {
-            let bb = self
-                .prog
-                .func_mut(f_handle)
-                .dfg_mut()
-                .new_bb()
-                .basic_block(Some(String::from("%") + &self.bb_idx.to_string()));
-            self.prog
-                .func_mut(f_handle)
-                .layout_mut()
-                .bbs_mut()
-                .extend([bb]);
-            self.bb_idx += 1;
-            bb
-        });
+    ) -> Vec<BasicBlock> {
+        let mut bb = bb.unwrap_or_else(|| { add_bb!(self, f_handle) });
+        let mut closed = false;
         let ast::Block(items) = b;
 
         // save the possibly replaced symbols
@@ -253,9 +276,21 @@ impl IRBuilder {
         for item in items {
             match item {
                 ast::BlockItem::Stmt(stmt) => {
-                    self.add_stmt(f_handle, bb, stmt);
-                    if let ast::Stmt::Return(_) = stmt {
+                    let bbs = self.add_stmt(f_handle, bb, stmt);
+                    if bbs.is_empty() {
+                        closed = true;
                         break;
+                    }
+                    bb = if bbs.len() > 1 {
+                        // re-converge the divergent basic blocks
+                        let new_bb = add_bb!(self, f_handle);
+                        for open_bb in bbs {
+                            let jump = new_value!(self, f_handle).jump(new_bb);
+                            add_insn!(self, f_handle, open_bb, [jump]);
+                        }
+                        new_bb
+                    } else {
+                        bbs[0]
                     }
                 }
                 ast::BlockItem::Decl(decl) => match decl {
@@ -319,7 +354,11 @@ impl IRBuilder {
             }
         }
 
-        bb
+        if closed {
+            vec![]
+        } else {
+            vec![bb]
+        }
     }
 
     fn add_func(&mut self, f: &ast::FuncDef) {

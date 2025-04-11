@@ -5,6 +5,7 @@ mod codegen;
 use std::env;
 use std::fs;
 use koopa;
+use std::io::Write;
 
 fn main() {
     let conf = cli::parse_args(env::args());
@@ -13,12 +14,12 @@ fn main() {
     }
 
     let source = fs::read_to_string(&conf.inputs[0]).unwrap();
-    let output_file = fs::File::create(&conf.output).unwrap();
+    let mut output_file = fs::File::create(&conf.output).unwrap();
     let parser = sysy::parser::TransUnitParser::new();
     let ast = parser.parse(&source).unwrap();
 
     if conf.output_type == cli::OutputType::AST {
-        println!("{:?}", ast);
+        write!(output_file, "{:?}", ast).unwrap();
         return;
     }
 

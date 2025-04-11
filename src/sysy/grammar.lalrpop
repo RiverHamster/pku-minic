@@ -170,6 +170,16 @@ pub Block: ast::Block = {
 }
 
 pub Stmt: ast::Stmt = {
+    <s: OpenStmt> => s,
+    <s: ClosedStmt> => s,
+}
+
+pub OpenStmt: ast::Stmt = {
+    "if" "(" <cond: Expr> ")" <s1: Stmt> => ast::Stmt::If(cond, Box::new(s1), Box::new(ast::Stmt::Empty)),
+    "if" "(" <cond: Expr> ")" <s1: ClosedStmt> "else" <s2: OpenStmt> => ast::Stmt::If(cond, Box::new(s1), Box::new(s2)),
+}
+
+pub ClosedStmt: ast::Stmt = {
     "break" ";" => ast::Stmt::Break,
     "continue" ";" => ast::Stmt::Continue,
     "return" <e: Expr> ";" => ast::Stmt::Return(Some(e)),
@@ -178,7 +188,7 @@ pub Stmt: ast::Stmt = {
     <b: Block> => ast::Stmt::Block(Box::new(b)),
     <l: Expr> "=" <r: Expr> ";" => ast::Stmt::Assign(l, r),
     ";" => ast::Stmt::Empty,
-    // TODO: if, else, while
+    "if" "(" <cond: Expr> ")" <s1: ClosedStmt> "else" <s2: ClosedStmt> => ast::Stmt::If(cond, Box::new(s1), Box::new(s2)),
 }
 
 pub SingleDim: ast::Expr = {

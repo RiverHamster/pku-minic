@@ -140,7 +140,36 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
 
                         // write the value to the stack
                         let pos = stk_val.get(*val_handle, dfg);
-                        writeln!(self.writer, "  sw t0, {}(sp)", pos).unwrap();
+                        writeln!(self.writer, "  sw t0, {pos}(sp)").unwrap();
+                    }
+                    ValueKind::Jump(j) => {
+                        let target = j.target();
+                        writeln!(
+                            self.writer,
+                            "  j L{}",
+                            &dfg.bb(target).name().as_ref().unwrap()[1..]
+                        )
+                        .unwrap();
+                    }
+                    ValueKind::Branch(b) => {
+                        let cond = b.cond();
+                        let target_true = b.true_bb();
+                        let target_false = b.false_bb();
+
+                        let cond_off = stk_val.get(cond, dfg);
+                        writeln!(self.writer, "  lw t0, {cond_off}(sp)").unwrap();
+                        writeln!(
+                            self.writer,
+                            "  bnez t0, L{}",
+                            &dfg.bb(target_true).name().as_ref().unwrap()[1..]
+                        )
+                        .unwrap();
+                        writeln!(
+                            self.writer,
+                            "  j L{}",
+                            &dfg.bb(target_false).name().as_ref().unwrap()[1..]
+                        )
+                        .unwrap();
                     }
                     _ => unimplemented!("value kind {:?} not implemented", val.kind()),
                 }
