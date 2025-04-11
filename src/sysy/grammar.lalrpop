@@ -28,7 +28,7 @@ match {
 pub LitInt: ast::LitInt = {
     <s:r"[1-9][0-9]*"> => ast::LitInt(i32::from_str_radix(s, 10).unwrap()),
     <s:r"0[0-9]*"> => ast::LitInt(i32::from_str_radix(s, 8).unwrap()),
-    <s:r"0x[0-9a-fA-F]+"> => ast::LitInt(i32::from_str_radix(&s[2..], 16).unwrap()),
+    <s:r"0[xX][0-9a-fA-F]+"> => ast::LitInt(i32::from_str_radix(&s[2..], 16).unwrap()),
 };
 
 // TODO: give precedence to keywords
