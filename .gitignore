@@ -4,3 +4,6 @@ example/c/*.s
 example/c/*.ast
 Cargo.lock
 testcases
+a.out
+*.log
+*.o

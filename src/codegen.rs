@@ -2,6 +2,9 @@ use core::panic;
 use koopa::ir::{dfg::DataFlowGraph, *};
 use std::{collections::HashMap, io};
 
+const RV_ADDI_LIMIT: usize = 2047;
+const RV_OFFSET_LIMIT: usize = 2047;
+
 struct SimpleRISCVBuilder<W: io::Write> {
     writer: W,
 }
@@ -50,6 +53,35 @@ impl StackManager {
     }
 }
 
+fn load_stack(
+    writer: &mut impl io::Write,
+    stack_offset: usize,
+    reg: &str,
+) {
+    if stack_offset > RV_OFFSET_LIMIT {
+        writeln!(writer, "  li {reg}, {stack_offset}").unwrap();
+        writeln!(writer, "  add {reg}, sp, {reg}").unwrap();
+        writeln!(writer, "  lw {reg}, 0({reg})").unwrap();
+    } else {
+        writeln!(writer, "  lw {reg}, {stack_offset}(sp)").unwrap();
+    }
+}
+
+/// WARNING: overwrites t2
+fn write_stack(
+    writer: &mut impl io::Write,
+    stack_offset: usize,
+    reg: &str,
+) {
+    if stack_offset > RV_OFFSET_LIMIT {
+        writeln!(writer, "  li t2, {}", stack_offset).unwrap();
+        writeln!(writer, "  add t2, sp, t2").unwrap();
+        writeln!(writer, "  sw {reg}, 0(t2)").unwrap();
+    } else {
+        writeln!(writer, "  sw {reg}, {stack_offset}(sp)").unwrap();
+    }
+}
+
 impl<W: io::Write> SimpleRISCVBuilder<W> {
     fn new(writer: W) -> Self {
         Self { writer }
@@ -62,7 +94,12 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
         writeln!(self.writer, "  .globl {}\n{}:", f_name, f_name).unwrap();
 
         let (stack_size, val_size) = stack_size(prog, f_handle);
-        writeln!(self.writer, "  addi sp, sp, -{}", stack_size).unwrap();
+        if stack_size > RV_ADDI_LIMIT {
+            writeln!(self.writer, "  li t0, -{}", stack_size).unwrap();
+            writeln!(self.writer, "  add sp, sp, t0").unwrap();
+        } else {
+            writeln!(self.writer, "  addi sp, sp, -{}", stack_size).unwrap();
+        }
 
         let mut stk_val = StackManager::new(0);
         let mut stk_var = StackManager::new(val_size);
@@ -71,7 +108,7 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
             if let ValueKind::Integer(i) = val_data.kind() {
                 let pos = stk_val.get(*val, dfg);
                 writeln!(self.writer, "  li t0, {}", i.value()).unwrap();
-                writeln!(self.writer, "  sw t0, {pos}(sp)").unwrap();
+                write_stack(&mut self.writer, pos, "t0");
             }
         }
 
@@ -90,21 +127,26 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                     ValueKind::Load(l) => {
                         let src_off = stk_var.get(l.src(), dfg);
                         let pos = stk_val.get(*val_handle, dfg);
-                        writeln!(self.writer, "  lw t0, {src_off}(sp)").unwrap();
-                        writeln!(self.writer, "  sw t0, {pos}(sp)").unwrap();
+                        load_stack(&mut self.writer, src_off, "t0");
+                        write_stack(&mut self.writer, pos, "t0");
                     }
                     ValueKind::Store(s) => {
                         let src_off = stk_val.get(s.value(), dfg);
                         let dst_off = stk_var.get(s.dest(), dfg);
-                        writeln!(self.writer, "  lw t0, {src_off}(sp)").unwrap();
-                        writeln!(self.writer, "  sw t0, {dst_off}(sp)").unwrap();
+                        load_stack(&mut self.writer, src_off, "t0");
+                        write_stack(&mut self.writer, dst_off, "t0");
                     }
                     ValueKind::Return(r) => {
                         if let Some(v) = r.value() {
                             let pos = stk_val.get(v, dfg);
-                            writeln!(self.writer, "  lw a0, {pos}(sp)").unwrap();
+                            write_stack(&mut self.writer, pos, "a0");
                         }
-                        writeln!(self.writer, "  addi sp, sp, {}", stack_size).unwrap();
+                        if stack_size > RV_ADDI_LIMIT {
+                            writeln!(self.writer, "  li t0, {}", stack_size).unwrap();
+                            writeln!(self.writer, "  add sp, sp, t0").unwrap();
+                        } else {
+                            writeln!(self.writer, "  addi sp, sp, {}", stack_size).unwrap();
+                        }
                         writeln!(self.writer, "  ret").unwrap();
                     }
                     ValueKind::Binary(b) => {
@@ -113,8 +155,8 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                         let rhs = b.rhs();
                         let lhs_off = stk_val.get(lhs, dfg);
                         let rhs_off = stk_val.get(rhs, dfg);
-                        writeln!(self.writer, "  lw t0, {lhs_off}(sp)").unwrap();
-                        writeln!(self.writer, "  lw t1, {rhs_off}(sp)").unwrap();
+                        load_stack(&mut self.writer, lhs_off, "t0");
+                        load_stack(&mut self.writer, rhs_off, "t1");
 
                         // perform the operation
                         let insns = match b.op() {
@@ -140,7 +182,7 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
 
                         // write the value to the stack
                         let pos = stk_val.get(*val_handle, dfg);
-                        writeln!(self.writer, "  sw t0, {pos}(sp)").unwrap();
+                        write_stack(&mut self.writer, pos, "t0");
                     }
                     ValueKind::Jump(j) => {
                         let target = j.target();
@@ -157,7 +199,7 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                         let target_false = b.false_bb();
 
                         let cond_off = stk_val.get(cond, dfg);
-                        writeln!(self.writer, "  lw t0, {cond_off}(sp)").unwrap();
+                        load_stack(&mut self.writer, cond_off, "t0");
                         writeln!(
                             self.writer,
                             "  bnez t0, L{}",
