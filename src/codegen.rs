@@ -139,7 +139,7 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                     ValueKind::Return(r) => {
                         if let Some(v) = r.value() {
                             let pos = stk_val.get(v, dfg);
-                            write_stack(&mut self.writer, pos, "a0");
+                            load_stack(&mut self.writer, pos, "a0");
                         }
                         if stack_size > RV_ADDI_LIMIT {
                             writeln!(self.writer, "  li t0, {}", stack_size).unwrap();
