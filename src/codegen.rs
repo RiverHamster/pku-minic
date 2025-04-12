@@ -53,11 +53,7 @@ impl StackManager {
     }
 }
 
-fn load_stack(
-    writer: &mut impl io::Write,
-    stack_offset: usize,
-    reg: &str,
-) {
+fn load_stack(writer: &mut impl io::Write, stack_offset: usize, reg: &str) {
     if stack_offset > RV_OFFSET_LIMIT {
         writeln!(writer, "  li {reg}, {stack_offset}").unwrap();
         writeln!(writer, "  add {reg}, sp, {reg}").unwrap();
@@ -68,11 +64,7 @@ fn load_stack(
 }
 
 /// WARNING: overwrites t2
-fn write_stack(
-    writer: &mut impl io::Write,
-    stack_offset: usize,
-    reg: &str,
-) {
+fn write_stack(writer: &mut impl io::Write, stack_offset: usize, reg: &str) {
     if stack_offset > RV_OFFSET_LIMIT {
         writeln!(writer, "  li t2, {}", stack_offset).unwrap();
         writeln!(writer, "  add t2, sp, t2").unwrap();

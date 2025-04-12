@@ -4,6 +4,7 @@ pub enum OutputType {
     AST,
     Koopa,
     RISCV,
+    LLVM,
 }
 
 #[derive(Debug)]
@@ -55,6 +56,14 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
                     "Duplicate output type"
                 );
                 conf.output_type = OutputType::RISCV;
+            }
+            "-llvm" => {
+                assert_eq!(
+                    conf.output_type,
+                    OutputType::Unknown,
+                    "Duplicate output type"
+                );
+                conf.output_type = OutputType::LLVM;
             }
             _ => {
                 conf.inputs.push(arg);

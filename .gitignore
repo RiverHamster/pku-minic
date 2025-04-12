@@ -7,3 +7,6 @@ testcases
 a.out
 *.log
 *.o
+example/c/random.ll
+example/c/random.c
+example/c/koopac

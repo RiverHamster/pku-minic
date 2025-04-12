@@ -1,10 +1,10 @@
 mod cli;
-mod sysy;
-mod irgen;
 mod codegen;
+mod irgen;
+mod sysy;
+use koopa;
 use std::env;
 use std::fs;
-use koopa;
 use std::io::Write;
 
 fn main() {
@@ -25,14 +25,35 @@ fn main() {
 
     let ir_program = irgen::gen_ir(&ast);
 
-    if conf.output_type == cli::OutputType::Koopa {
-        let mut koopa_gen = koopa::back::Generator::with_visitor(output_file, koopa::back::koopa::Visitor::default());
-        koopa_gen.generate_on(&ir_program).expect("Failed to dump Koopa IR");
-        return;
-    }
+    match conf.output_type {
+        cli::OutputType::AST => {
+            // AST is already handled above
+        }
+        cli::OutputType::Koopa => {
+            let mut koopa_gen = koopa::back::Generator::with_visitor(
+                output_file,
+                koopa::back::koopa::Visitor::default(),
+            );
+            koopa_gen
+                .generate_on(&ir_program)
+                .expect("Failed to dump Koopa IR");
+        }
 
-    if conf.output_type == cli::OutputType::RISCV {
-        codegen::gen_riscv_simple(&ir_program, output_file);
-        return;
+        cli::OutputType::LLVM => {
+            let mut llvm_gen = koopa::back::LlvmGenerator::with_visitor(
+                output_file,
+                koopa::back::llvm::Visitor::default(),
+            );
+            llvm_gen
+                .generate_on(&ir_program)
+                .expect("Failed to dump LLVM IR");
+        }
+
+        cli::OutputType::RISCV => {
+            codegen::gen_riscv_simple(&ir_program, output_file);
+        }
+        cli::OutputType::Unknown => {
+            unreachable!();
+        }
     }
 }

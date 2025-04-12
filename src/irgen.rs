@@ -1,5 +1,4 @@
 use crate::sysy::ast::{self, Expr};
-use core::panic;
 use std::collections::HashMap;
 
 use koopa::ir::{builder_traits::*, *};
@@ -38,7 +37,7 @@ macro_rules! new_value {
 }
 
 macro_rules! add_bb {
-    ($module:ident, $f_handle:expr) => { {
+    ($module:ident, $f_handle:expr) => {{
         let bb = $module
             .prog
             .func_mut($f_handle)
@@ -53,8 +52,7 @@ macro_rules! add_bb {
             .extend([bb]);
         $module.bb_idx += 1;
         bb
-    }
-    };
+    }};
 }
 
 impl IRBuilder {
@@ -159,7 +157,7 @@ impl IRBuilder {
                 let val = self.eval_i32_const(expr);
                 match op {
                     ast::UnaryOp::Neg => -val,
-                    ast::UnaryOp::LNot => (val != 0) as i32,
+                    ast::UnaryOp::LNot => (val == 0) as i32,
                     ast::UnaryOp::Pos => val,
                 }
             }
@@ -219,9 +217,7 @@ impl IRBuilder {
                 } => unimplemented!("array index assign"),
                 _ => panic!("assign to non-lvalue"),
             },
-            ast::Stmt::Block(b) => {
-                self.add_block(f_handle, Some(bb), b)
-            }
+            ast::Stmt::Block(b) => self.add_block(f_handle, Some(bb), b),
             ast::Stmt::Empty => vec![bb],
             // TODO: Expr may have side effects
             ast::Stmt::Expr(_) => {
@@ -250,7 +246,7 @@ impl IRBuilder {
         bb: Option<BasicBlock>,
         b: &ast::Block,
     ) -> Vec<BasicBlock> {
-        let mut bb = bb.unwrap_or_else(|| { add_bb!(self, f_handle) });
+        let mut bb = bb.unwrap_or_else(|| add_bb!(self, f_handle));
         let mut closed = false;
         let ast::Block(items) = b;
 
