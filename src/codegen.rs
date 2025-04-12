@@ -2,6 +2,8 @@ use core::panic;
 use koopa::ir::{dfg::DataFlowGraph, *};
 use std::{collections::HashMap, io};
 
+const RV_ADDI_LIMIT: usize = 2047;
+
 struct SimpleRISCVBuilder<W: io::Write> {
     writer: W,
 }
@@ -62,7 +64,12 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
         writeln!(self.writer, "  .globl {}\n{}:", f_name, f_name).unwrap();
 
         let (stack_size, val_size) = stack_size(prog, f_handle);
-        writeln!(self.writer, "  addi sp, sp, -{}", stack_size).unwrap();
+        if stack_size > RV_ADDI_LIMIT {
+            writeln!(self.writer, "  li t0, -{}", stack_size).unwrap();
+            writeln!(self.writer, "  addi sp, sp, t0").unwrap();
+        } else {
+            writeln!(self.writer, "  addi sp, sp, -{}", stack_size).unwrap();
+        }
 
         let mut stk_val = StackManager::new(0);
         let mut stk_var = StackManager::new(val_size);
