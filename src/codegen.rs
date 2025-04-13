@@ -108,7 +108,7 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
         for (bb, bbn) in bbs {
             let bb_name = dfg.bb(*bb).name().as_ref().unwrap();
             writeln!(self.writer, "L{}:", &bb_name[1..]).unwrap();
-            for (val_handle, inst_node) in bbn.insts() {
+            for (val_handle, _inst_node) in bbn.insts() {
                 let val = dfg.value(*val_handle);
                 match val.kind() {
                     ValueKind::Integer(i) => {
@@ -211,7 +211,7 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
         }
     }
 
-    fn add_global_vars(&mut self, prog: &Program) {
+    fn add_global_vars(&mut self, _prog: &Program) {
         // TODO
     }
 

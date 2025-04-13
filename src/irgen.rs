@@ -64,14 +64,22 @@ impl IRBuilder {
         }
     }
 
-    // TODO: type information
-    fn eval_expr(&mut self, f_handle: Function, bb: BasicBlock, e: &ast::Expr) -> Value {
+    /// Add instructions to evaluate `e` in basic block `bb`.
+    /// Returns the value of `e` and the converging basic block. Basic blocks
+    /// may diverge due to short-circuit evaluation.
+    fn eval_expr(
+        &mut self,
+        f_handle: Function,
+        bb: BasicBlock,
+        e: &ast::Expr,
+    ) -> (Value, BasicBlock) {
         // let dfg = self.prog.func(f_handle).dfg_mut();
         let zero = new_value!(self, f_handle).integer(0);
         match e {
-            Expr::LitInt(i) => new_value!(self, f_handle).integer(i.0),
+            Expr::LitInt(i) => (new_value!(self, f_handle).integer(i.0), bb),
             Expr::UnaryExpr { op, expr } => {
-                let expr_val = self.eval_expr(f_handle, bb, expr);
+                // Overwrite the current bb.
+                let (expr_val, bb) = self.eval_expr(f_handle, bb, expr);
                 let insn = match op {
                     ast::UnaryOp::Neg => {
                         new_value!(self, f_handle).binary(BinaryOp::Sub, zero, expr_val)
@@ -87,7 +95,7 @@ impl IRBuilder {
                     add_insn!(self, f_handle, bb, [insn]);
                 }
 
-                insn
+                (insn, bb)
             }
             Expr::BinaryExpr { op, lhs, rhs } => {
                 use ast::BinaryOp::*;
@@ -109,34 +117,69 @@ impl IRBuilder {
                     Index => unimplemented!(),
                 };
 
-                let mut lhs_val = self.eval_expr(f_handle, bb, lhs);
-                let mut rhs_val = self.eval_expr(f_handle, bb, rhs);
+                // Overwrite the current bb.
+                let (lhs_val, bb) = self.eval_expr(f_handle, bb, lhs);
 
-                // TODO: short-circuiting
                 if *op == LAnd || *op == LOr {
-                    let lhs_logical =
-                        new_value!(self, f_handle).binary(BinaryOp::NotEq, zero, lhs_val);
+                    let expr_val = new_value!(self, f_handle).alloc(Type::get_i32());
+                    // Short-circuit.
+                    let bb_short = add_bb!(self, f_handle);
+                    // Not short-circuit.
+                    let bb_full = add_bb!(self, f_handle);
+                    let bb_conv = add_bb!(self, f_handle);
+                    let jmp_conv1 = new_value!(self, f_handle).jump(bb_conv);
+                    let jmp_conv2 = new_value!(self, f_handle).jump(bb_conv);
+
+                    // Branch on the LHS value.
+                    let br1 = if *op == LAnd {
+                        new_value!(self, f_handle).branch(lhs_val, bb_full, bb_short)
+                    } else {
+                        new_value!(self, f_handle).branch(lhs_val, bb_short, bb_full)
+                    };
+                    // BB: Allocation and branch.
+                    add_insn!(self, f_handle, bb, [expr_val, br1]);
+
+                    let short_val =
+                        new_value!(self, f_handle).integer(if *op == LAnd { 0 } else { 1 });
+                    let short_store = new_value!(self, f_handle).store(short_val, expr_val);
+
+                    // BB_SHORT: Write the short-circuit result, then converge.
+                    add_insn!(self, f_handle, bb_short, [short_store, jmp_conv1]);
+
+                    // BB_FULL: Evaluate RHS, and write result
+                    let (rhs_val, bb_full) = self.eval_expr(f_handle, bb_full, rhs);
                     let rhs_logical =
                         new_value!(self, f_handle).binary(BinaryOp::NotEq, zero, rhs_val);
-                    add_insn!(self, f_handle, bb, [lhs_logical, rhs_logical]);
+                    let full_store = new_value!(self, f_handle).store(rhs_logical, expr_val);
+                    add_insn!(
+                        self,
+                        f_handle,
+                        bb_full,
+                        [rhs_logical, full_store, jmp_conv2]
+                    );
 
-                    lhs_val = lhs_logical;
-                    rhs_val = rhs_logical;
+                    // BB_CONV: Read the value from stack(alloc).
+                    let loaded_val = new_value!(self, f_handle).load(expr_val);
+                    add_insn!(self, f_handle, bb_conv, [loaded_val]);
+                    (loaded_val, bb_conv)
+                } else {
+                    // Overwrite the current bb.
+                    let (rhs_val, bb) = self.eval_expr(f_handle, bb, rhs);
+
+                    let insn = new_value!(self, f_handle).binary(ir_op, lhs_val, rhs_val);
+                    add_insn!(self, f_handle, bb, [insn]);
+                    (insn, bb)
                 }
-
-                let insn = new_value!(self, f_handle).binary(ir_op, lhs_val, rhs_val);
-                add_insn!(self, f_handle, bb, [insn]);
-                insn
             }
             Expr::Ident(ident) => {
                 use SymbolTableEntry::*;
                 match self.syms.get(&ident.0) {
-                    Some(Const(i)) => new_value!(self, f_handle).integer(*i),
+                    Some(Const(i)) => (new_value!(self, f_handle).integer(*i), bb),
                     // Some(Global(val)) => *val,
                     Some(Var(val)) => {
                         let loaded = new_value!(self, f_handle).load(*val);
                         add_insn!(self, f_handle, bb, [loaded]);
-                        loaded
+                        (loaded, bb)
                     }
                     None => panic!("undefined symbol: {}", ident.0),
                 }
@@ -186,12 +229,22 @@ impl IRBuilder {
 
     /// Append a statement to the current open basic block `bb`.
     /// Return the open basic blocks.
-    fn add_stmt(&mut self, f_handle: Function, bb: BasicBlock, b: &ast::Stmt) -> Vec<BasicBlock> {
-        match b {
+    #[must_use]
+    fn add_stmt(&mut self, f_handle: Function, bb: BasicBlock, s: &ast::Stmt) -> Vec<BasicBlock> {
+        eprintln!("add_stmt bb {:?} stmt {:?}", bb, s);
+        match s {
             ast::Stmt::Return(ret) => {
-                let ret_eval = ret.as_ref().map(|e| self.eval_expr(f_handle, bb, e));
-                let ret = new_value!(self, f_handle).ret(ret_eval);
-                add_insn!(self, f_handle, bb, [ret]);
+                match ret {
+                    None => {
+                        let ret = new_value!(self, f_handle).ret(None);
+                        add_insn!(self, f_handle, bb, [ret]);
+                    }
+                    Some(e) => {
+                        let (val, bb) = self.eval_expr(f_handle, bb, e);
+                        let ret = new_value!(self, f_handle).ret(Some(val));
+                        add_insn!(self, f_handle, bb, [ret]);
+                    }
+                };
                 vec![]
             }
             ast::Stmt::Assign(lhs, rhs) => match lhs {
@@ -201,19 +254,21 @@ impl IRBuilder {
                         .get(&ident.0)
                         .expect(&format!("undefined symbol: {}", ident.0))
                         .clone();
-                    let rval = self.eval_expr(f_handle, bb, rhs).clone();
+                    let (rval, bb) = self.eval_expr(f_handle, bb, rhs).clone();
                     if let SymbolTableEntry::Var(var) = lval_entry {
                         let store = new_value!(self, f_handle).store(rval, var);
                         add_insn!(self, f_handle, bb, [store]);
                     } else {
                         panic!("assign to non-lvalue");
                     }
+
+                    eprintln!("returned bb {:?}", bb);
                     vec![bb]
                 }
                 ast::Expr::BinaryExpr {
                     op: ast::BinaryOp::Index,
-                    lhs: base,
-                    rhs: index,
+                    lhs: _base,
+                    rhs: _index,
                 } => unimplemented!("array index assign"),
                 _ => panic!("assign to non-lvalue"),
             },
@@ -225,7 +280,7 @@ impl IRBuilder {
                 vec![bb]
             }
             ast::Stmt::If(cond, then_stmt, else_stmt) => {
-                let cond_val = self.eval_expr(f_handle, bb, cond);
+                let (cond_val, bb) = self.eval_expr(f_handle, bb, cond);
                 let then_bb = add_bb!(self, f_handle);
                 let else_bb = add_bb!(self, f_handle);
                 let then_open = self.add_stmt(f_handle, then_bb, then_stmt);
@@ -236,16 +291,18 @@ impl IRBuilder {
                 then_open.into_iter().chain(else_open.into_iter()).collect()
             }
             // TODO: other stmts
-            _ => unimplemented!("statement {:?} unimplemented", b),
+            _ => unimplemented!("statement {:?} unimplemented", s),
         }
     }
 
+    #[must_use]
     fn add_block(
         &mut self,
         f_handle: Function,
         bb: Option<BasicBlock>,
         b: &ast::Block,
     ) -> Vec<BasicBlock> {
+        eprintln!("add_block bb {:?} block {:?}", bb, b);
         let mut bb = bb.unwrap_or_else(|| add_bb!(self, f_handle));
         let mut closed = false;
         let ast::Block(items) = b;
@@ -270,9 +327,11 @@ impl IRBuilder {
             .collect::<Vec<_>>();
 
         for item in items {
+            eprintln!("add_block item {:?}", item);
             match item {
                 ast::BlockItem::Stmt(stmt) => {
                     let bbs = self.add_stmt(f_handle, bb, stmt);
+                    eprintln!("returned bbs {:?}", bbs);
                     if bbs.is_empty() {
                         closed = true;
                         break;
@@ -323,7 +382,7 @@ impl IRBuilder {
                             if let Some(init) = &v.init {
                                 match init {
                                     ast::InitExpr::Scalar(e) => {
-                                        self.add_stmt(
+                                        let bbs = self.add_stmt(
                                             f_handle,
                                             bb,
                                             &ast::Stmt::Assign(
@@ -331,8 +390,10 @@ impl IRBuilder {
                                                 e.clone(),
                                             ),
                                         );
+                                        assert!(bbs.len() == 1);
+                                        bb = bbs[0];
                                     }
-                                    ast::InitExpr::Array(e) => unimplemented!("array init"),
+                                    ast::InitExpr::Array(_e) => unimplemented!("array init"),
                                 }
                             }
                         }
@@ -368,14 +429,15 @@ impl IRBuilder {
             },
         ));
 
-        self.add_block(f_handle, None, &f.body);
+        let opens = self.add_block(f_handle, None, &f.body);
+        assert!(opens.is_empty());
     }
 
     pub fn parse(mut self, ast: &ast::TransUnit) -> Program {
         for item in ast.0.iter() {
             match item {
                 ast::TransUnitItem::FuncDef(f) => self.add_func(&f),
-                ast::TransUnitItem::Decl(d) => unimplemented!(),
+                ast::TransUnitItem::Decl(_d) => unimplemented!(),
             }
         }
         self.prog
