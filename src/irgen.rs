@@ -55,6 +55,14 @@ macro_rules! add_bb {
     }};
 }
 
+#[derive(Clone, Copy)]
+struct LoopEnv {
+    /// The basic block checking the loop condition.
+    bb_check: BasicBlock,
+    /// The basic block exiting the loop
+    bb_exit: BasicBlock,
+}
+
 impl IRBuilder {
     pub fn new() -> Self {
         Self {
@@ -230,7 +238,13 @@ impl IRBuilder {
     /// Append a statement to the current open basic block `bb`.
     /// Return the open basic blocks.
     #[must_use]
-    fn add_stmt(&mut self, f_handle: Function, bb: BasicBlock, s: &ast::Stmt) -> Vec<BasicBlock> {
+    fn add_stmt(
+        &mut self,
+        f_handle: Function,
+        bb: BasicBlock,
+        lenv: Option<LoopEnv>,
+        s: &ast::Stmt,
+    ) -> Vec<BasicBlock> {
         eprintln!("add_stmt bb {:?} stmt {:?}", bb, s);
         match s {
             ast::Stmt::Return(ret) => {
@@ -272,7 +286,7 @@ impl IRBuilder {
                 } => unimplemented!("array index assign"),
                 _ => panic!("assign to non-lvalue"),
             },
-            ast::Stmt::Block(b) => self.add_block(f_handle, Some(bb), b),
+            ast::Stmt::Block(b) => self.add_block(f_handle, Some(bb), lenv, b),
             ast::Stmt::Empty => vec![bb],
             // TODO: Expr may have side effects
             ast::Stmt::Expr(_) => {
@@ -283,12 +297,55 @@ impl IRBuilder {
                 let (cond_val, bb) = self.eval_expr(f_handle, bb, cond);
                 let then_bb = add_bb!(self, f_handle);
                 let else_bb = add_bb!(self, f_handle);
-                let then_open = self.add_stmt(f_handle, then_bb, then_stmt);
-                let else_open = self.add_stmt(f_handle, else_bb, else_stmt);
+                let then_open = self.add_stmt(f_handle, then_bb, lenv, then_stmt);
+                let else_open = self.add_stmt(f_handle, else_bb, lenv, else_stmt);
                 let branch = new_value!(self, f_handle).branch(cond_val, then_bb, else_bb);
                 add_insn!(self, f_handle, bb, [branch]);
 
                 then_open.into_iter().chain(else_open.into_iter()).collect()
+            }
+            ast::Stmt::While(cond, body) => {
+                let bb_check = add_bb!(self, f_handle);
+                let bb_body = add_bb!(self, f_handle);
+                let bb_exit = add_bb!(self, f_handle);
+
+                // Current basic block go to the check block
+                let jmp = new_value!(self, f_handle).jump(bb_check);
+                add_insn!(self, f_handle, bb, [jmp]);
+
+                // Check the condition
+                let (cond_val, bb_check_tail) = self.eval_expr(f_handle, bb_check, cond);
+                let branch = new_value!(self, f_handle).branch(cond_val, bb_body, bb_exit);
+                add_insn!(self, f_handle, bb_check_tail, [branch]);
+
+                let open_bbs =
+                    self.add_stmt(f_handle, bb_body, Some(LoopEnv { bb_check, bb_exit }), body);
+
+                // Converge the basic blocks
+                for open_bb in open_bbs {
+                    let jmp = new_value!(self, f_handle).jump(bb_check);
+                    add_insn!(self, f_handle, open_bb, [jmp]);
+                }
+
+                vec![bb_exit]
+            }
+            ast::Stmt::Break => {
+                if let Some(lenv) = lenv {
+                    let jmp = new_value!(self, f_handle).jump(lenv.bb_exit);
+                    add_insn!(self, f_handle, bb, [jmp]);
+                    vec![]
+                } else {
+                    panic!("break outside of loop");
+                }
+            }
+            ast::Stmt::Continue => {
+                if let Some(lenv) = lenv {
+                    let jmp = new_value!(self, f_handle).jump(lenv.bb_check);
+                    add_insn!(self, f_handle, bb, [jmp]);
+                    vec![]
+                } else {
+                    panic!("continue outside of loop");
+                }
             }
             // TODO: other stmts
             _ => unimplemented!("statement {:?} unimplemented", s),
@@ -300,6 +357,7 @@ impl IRBuilder {
         &mut self,
         f_handle: Function,
         bb: Option<BasicBlock>,
+        lenv: Option<LoopEnv>,
         b: &ast::Block,
     ) -> Vec<BasicBlock> {
         eprintln!("add_block bb {:?} block {:?}", bb, b);
@@ -330,7 +388,7 @@ impl IRBuilder {
             eprintln!("add_block item {:?}", item);
             match item {
                 ast::BlockItem::Stmt(stmt) => {
-                    let bbs = self.add_stmt(f_handle, bb, stmt);
+                    let bbs = self.add_stmt(f_handle, bb, lenv, stmt);
                     eprintln!("returned bbs {:?}", bbs);
                     if bbs.is_empty() {
                         closed = true;
@@ -385,6 +443,7 @@ impl IRBuilder {
                                         let bbs = self.add_stmt(
                                             f_handle,
                                             bb,
+                                            lenv,
                                             &ast::Stmt::Assign(
                                                 ast::Expr::Ident(v.name.clone()),
                                                 e.clone(),
@@ -429,7 +488,7 @@ impl IRBuilder {
             },
         ));
 
-        let opens = self.add_block(f_handle, None, &f.body);
+        let opens = self.add_block(f_handle, None, None, &f.body);
         assert!(opens.is_empty());
     }
 

@@ -189,6 +189,7 @@ pub ClosedStmt: ast::Stmt = {
     <l: Expr> "=" <r: Expr> ";" => ast::Stmt::Assign(l, r),
     ";" => ast::Stmt::Empty,
     "if" "(" <cond: Expr> ")" <s1: ClosedStmt> "else" <s2: ClosedStmt> => ast::Stmt::If(cond, Box::new(s1), Box::new(s2)),
+    "while" "(" <cond: Expr> ")" <s: ClosedStmt> => ast::Stmt::While(cond, Box::new(s)),
 }
 
 pub SingleDim: ast::Expr = {
