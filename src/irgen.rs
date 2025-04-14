@@ -489,7 +489,19 @@ impl IRBuilder {
         ));
 
         let opens = self.add_block(f_handle, None, None, &f.body);
-        assert!(opens.is_empty());
+        for bb in opens {
+            match f.ret_ty {
+                ast::BaseType::Void => {
+                    let ret = new_value!(self, f_handle).ret(None);
+                    add_insn!(self, f_handle, bb, [ret]);
+                }
+                _ => {
+                    let zero = new_value!(self, f_handle).integer(0);
+                    let ret = new_value!(self, f_handle).ret(Some(zero));
+                    add_insn!(self, f_handle, bb, [ret]);
+                }
+            }
+        }
     }
 
     pub fn parse(mut self, ast: &ast::TransUnit) -> Program {
