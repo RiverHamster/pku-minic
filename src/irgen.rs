@@ -1,7 +1,10 @@
 use crate::sysy::ast::{self, Expr};
+use core::panic;
 use std::collections::HashMap;
 
 use koopa::ir::{builder_traits::*, *};
+
+pub mod libsysy;
 
 #[derive(Debug, Clone, Copy)]
 enum SymbolTableEntry {
@@ -14,8 +17,11 @@ enum SymbolTableEntry {
 pub struct IRBuilder {
     prog: Program,
     bb_idx: usize,
-    // constants maps to integers, and variables maps to pointers
+    /// Constants maps to integers, and variables maps to pointers
     syms: HashMap<String, SymbolTableEntry>,
+    funcs: HashMap<String, Function>,
+    /// The function to initialize global variables. Called before main.
+    init_global: Option<(Function, BasicBlock)>,
 }
 
 macro_rules! add_insn {
@@ -69,6 +75,8 @@ impl IRBuilder {
             prog: Program::new(),
             bb_idx: 0,
             syms: HashMap::new(),
+            funcs: HashMap::new(),
+            init_global: None,
         }
     }
 
@@ -192,6 +200,27 @@ impl IRBuilder {
                     None => panic!("undefined symbol: {}", ident.0),
                 }
             }
+            Expr::FuncCall { name, args } => {
+                let mut bb = bb;
+                let vals: Vec<_> = args
+                    .iter()
+                    .map(|e| {
+                        let (val, new_bb) = self.eval_expr(f_handle, bb, e);
+                        bb = new_bb;
+                        val
+                    })
+                    .collect();
+
+                let callee = self
+                    .funcs
+                    .get(&name.0)
+                    .unwrap_or_else(|| panic!("undefined function: {}", name.0))
+                    .clone();
+                let call = new_value!(self, f_handle).call(callee, vals);
+
+                add_insn!(self, f_handle, bb, [call]);
+                (call, bb)
+            }
         }
     }
 
@@ -232,6 +261,7 @@ impl IRBuilder {
                     ast::BinaryOp::Index => unimplemented!(),
                 }
             }
+            Expr::FuncCall { name: _, args: _ } => panic!("function call in constant expression"),
         }
     }
 
@@ -288,9 +318,9 @@ impl IRBuilder {
             },
             ast::Stmt::Block(b) => self.add_block(f_handle, Some(bb), lenv, b),
             ast::Stmt::Empty => vec![bb],
-            // TODO: Expr may have side effects
-            ast::Stmt::Expr(_) => {
-                eprintln!("WARN: side effects in expr statement");
+            ast::Stmt::Expr(e) => {
+                // Expr may have side effects, e.g. function call
+                let (_val, bb) = self.eval_expr(f_handle, bb, e);
                 vec![bb]
             }
             ast::Stmt::If(cond, then_stmt, else_stmt) => {
@@ -348,7 +378,7 @@ impl IRBuilder {
                 }
             }
             // TODO: other stmts
-            _ => unimplemented!("statement {:?} unimplemented", s),
+            // _ => unimplemented!("statement {:?} unimplemented", s),
         }
     }
 
@@ -428,7 +458,7 @@ impl IRBuilder {
                         for v in &d.vars {
                             let base_ty = match d.base_ty {
                                 ast::BaseType::Int => Type::get_i32(),
-                                ast::BaseType::Void => Type::get_unit(),
+                                ast::BaseType::Void => panic!("void variable"),
                             };
                             let ty = v.shape.iter().rev().fold(base_ty, |ty, dim_expr| {
                                 Type::get_array(ty, self.eval_i32_const(dim_expr) as usize)
@@ -478,17 +508,45 @@ impl IRBuilder {
     }
 
     fn add_func(&mut self, f: &ast::FuncDef) {
-        // TODO: function arguments
         let f_handle = self.prog.new_func(FunctionData::with_param_names(
             String::from("@") + &f.name.0,
-            vec![],
+            // vec![],
+            f.params
+                .iter()
+                .map(|p| {
+                    (Some(String::from("@") + p.name.0.as_str()), {
+                        // TODO: array parameters
+                        assert!(p.ty == ast::BaseType::Int);
+                        Type::get_i32()
+                    })
+                })
+                .collect(),
             match f.ret_ty {
                 ast::BaseType::Int => Type::get_i32(),
                 ast::BaseType::Void => Type::get_unit(),
             },
         ));
 
-        let opens = self.add_block(f_handle, None, None, &f.body);
+        self.funcs.insert(f.name.0.clone(), f_handle);
+
+        // Copy all arguments to stack, and add them to symbol table.
+        let init_bb = add_bb!(self, f_handle);
+
+        for i in 0..f.params.len() {
+            let arg_val = self.prog.func(f_handle).params()[i];
+            let alloc = new_value!(self, f_handle).alloc(Type::get_i32());
+            let store = new_value!(self, f_handle).store(arg_val.clone(), alloc);
+            add_insn!(self, f_handle, init_bb, [alloc, store]);
+            self.syms
+                .insert(f.params[i].name.0.clone(), SymbolTableEntry::Var(alloc));
+        }
+
+        if f.name.0 == "main" {
+            let call = new_value!(self, f_handle).call(self.init_global.unwrap().0, vec![]);
+            add_insn!(self, f_handle, init_bb, [call]);
+        }
+
+        let opens = self.add_block(f_handle, Some(init_bb), None, &f.body);
         for bb in opens {
             match f.ret_ty {
                 ast::BaseType::Void => {
@@ -504,13 +562,86 @@ impl IRBuilder {
         }
     }
 
+    fn add_global_decl(&mut self, d: &ast::Decl) {
+        match d {
+            ast::Decl::Const(d) => match d {
+                ast::VarDecl {
+                    base_ty: ast::BaseType::Int,
+                    vars,
+                } => {
+                    for v in vars {
+                        let val = match &v.init {
+                            Some(ast::InitExpr::Scalar(e)) => self.eval_i32_const(e),
+                            Some(ast::InitExpr::Array(_)) => unimplemented!(),
+                            None => panic!("const {} uninitialized", v.name.0),
+                        };
+                        self.syms
+                            .insert(v.name.0.clone(), SymbolTableEntry::Const(val));
+                    }
+                }
+                _ => panic!("base_ty of Decl must be int"),
+            },
+            ast::Decl::Var(d) => match d {
+                ast::VarDecl {
+                    base_ty: ast::BaseType::Int,
+                    vars,
+                } => {
+                    for v in vars {
+                        let base_ty = match d.base_ty {
+                            ast::BaseType::Int => Type::get_i32(),
+                            ast::BaseType::Void => panic!("void variable"),
+                        };
+                        let _ty = v.shape.iter().rev().fold(base_ty, |ty, dim_expr| {
+                            Type::get_array(ty, self.eval_i32_const(dim_expr) as usize)
+                        });
+                        // TODO: global array
+                        let zeros = self.prog.new_value().zero_init(Type::get_i32());
+                        let alloc = self.prog.new_value().global_alloc(zeros);
+                        self.syms
+                            .insert(v.name.0.clone(), SymbolTableEntry::Var(alloc));
+
+                        if let Some(init) = v.init.as_ref() {
+                            let (init_global, mut bb) = self.init_global.clone().unwrap();
+                            match init {
+                                ast::InitExpr::Scalar(e) => {
+                                    let (val, new_bb) = self.eval_expr(init_global, bb, &e);
+                                    let store = new_value!(self, init_global).store(val, alloc);
+                                    add_insn!(self, init_global, new_bb, [store]);
+                                    bb = new_bb;
+                                }
+                                ast::InitExpr::Array(_v) => unimplemented!("array init"),
+                            }
+                            self.init_global = Some((init_global, bb));
+                        }
+                    }
+                }
+                _ => panic!("base_ty of Decl must be int"),
+            },
+        }
+    }
+
     pub fn parse(mut self, ast: &ast::TransUnit) -> Program {
+        // libsysy::decl_sysy_stdlib(&mut self.prog);
+        libsysy::decl_sysy_stdlib(&mut self);
+
+        let f_init_global = self.prog.new_func(FunctionData::new(
+            "@Tfb77qtUahKLryrSePOqOmMEdL3rcXYICN6C9XFY".into(),
+            vec![],
+            Type::get_unit(),
+        ));
+        let init_bb = add_bb!(self, f_init_global);
+        self.init_global = Some((f_init_global, init_bb));
+
         for item in ast.0.iter() {
             match item {
                 ast::TransUnitItem::FuncDef(f) => self.add_func(&f),
-                ast::TransUnitItem::Decl(_d) => unimplemented!(),
+                ast::TransUnitItem::Decl(d) => self.add_global_decl(d),
             }
         }
+
+        let ret = new_value!(self, f_init_global).ret(None);
+        add_insn!(self, f_init_global, self.init_global.unwrap().1, [ret]);
+
         self.prog
     }
 }

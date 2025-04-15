@@ -45,6 +45,10 @@ impl Into<Expr> for LitInt {
 pub enum Expr {
     Ident(Ident),
     LitInt(LitInt),
+    FuncCall {
+        name: Ident,
+        args: Vec<Expr>,
+    },
     UnaryExpr {
         op: UnaryOp,
         expr: Box<Expr>,
@@ -56,7 +60,7 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseType {
     Int,
     Void,
@@ -116,10 +120,17 @@ pub enum BlockItem {
 pub struct Block(pub Vec<BlockItem>);
 
 #[derive(Debug, Clone)]
+pub struct FuncParam {
+    // TODO: array argument
+    pub ty: BaseType,
+    pub name: Ident,
+}
+
+#[derive(Debug, Clone)]
 pub struct FuncDef {
     pub ret_ty: BaseType,
     pub name: Ident,
-    pub params: Vec<(BaseType, Ident)>,
+    pub params: Vec<FuncParam>,
     pub body: Block,
 }
 

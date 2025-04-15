@@ -40,6 +40,15 @@ pub Term: ast::Expr = {
     <n: LitInt> => ast::Expr::LitInt(n),
     <i: Ident> => ast::Expr::Ident(i),
     "(" <e: Expr> ")" => e,
+    <name: Ident> "(" <mut args: (<Expr> ",")*> <arg: Expr?> ")" => {
+        if let Some(arg) = arg {
+            args.push(arg);
+        }
+        ast::Expr::FuncCall {
+            name: name,
+            args: args,
+        }
+    }
 }
 
 pub Expr: ast::Expr = {
@@ -236,12 +245,23 @@ pub Decl: ast::Decl = {
     "const" <v: VarDecl> => ast::Decl::Const(v),
 }
 
-// TODO: parameters
+pub FuncParam: ast::FuncParam = {
+    <t: BaseType> <name: Ident> => ast::FuncParam {
+        ty: t,
+        name: name,
+    },
+}
+
 pub FuncDef: ast::FuncDef = {
-    <t: BaseType> <name: Ident> "(" ")" <b: Block> => ast::FuncDef{
+    <t: BaseType> <name: Ident> "(" <mut params: (<FuncParam> ",")*> <param: FuncParam?> ")" <b: Block> => ast::FuncDef{
         ret_ty: t,
         name: name,
-        params: vec![],
+        params: {
+            if let Some(param) = param {
+                params.push(param);
+            }
+            params
+        },
         body: b,
     },
 }
