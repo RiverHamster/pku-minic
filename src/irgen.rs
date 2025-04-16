@@ -275,7 +275,7 @@ impl IRBuilder {
         lenv: Option<LoopEnv>,
         s: &ast::Stmt,
     ) -> Vec<BasicBlock> {
-        eprintln!("add_stmt bb {:?} stmt {:?}", bb, s);
+        // eprintln!("add_stmt bb {:?} stmt {:?}", bb, s);
         match s {
             ast::Stmt::Return(ret) => {
                 match ret {
@@ -306,7 +306,7 @@ impl IRBuilder {
                         panic!("assign to non-lvalue");
                     }
 
-                    eprintln!("returned bb {:?}", bb);
+                    // eprintln!("returned bb {:?}", bb);
                     vec![bb]
                 }
                 ast::Expr::BinaryExpr {
@@ -376,9 +376,8 @@ impl IRBuilder {
                 } else {
                     panic!("continue outside of loop");
                 }
-            }
-            // TODO: other stmts
-            // _ => unimplemented!("statement {:?} unimplemented", s),
+            } // TODO: other stmts
+              // _ => unimplemented!("statement {:?} unimplemented", s),
         }
     }
 
@@ -390,7 +389,7 @@ impl IRBuilder {
         lenv: Option<LoopEnv>,
         b: &ast::Block,
     ) -> Vec<BasicBlock> {
-        eprintln!("add_block bb {:?} block {:?}", bb, b);
+        // eprintln!("add_block bb {:?} block {:?}", bb, b);
         let mut bb = bb.unwrap_or_else(|| add_bb!(self, f_handle));
         let mut closed = false;
         let ast::Block(items) = b;
@@ -415,11 +414,11 @@ impl IRBuilder {
             .collect::<Vec<_>>();
 
         for item in items {
-            eprintln!("add_block item {:?}", item);
+            // eprintln!("add_block item {:?}", item);
             match item {
                 ast::BlockItem::Stmt(stmt) => {
                     let bbs = self.add_stmt(f_handle, bb, lenv, stmt);
-                    eprintln!("returned bbs {:?}", bbs);
+                    // eprintln!("returned bbs {:?}", bbs);
                     if bbs.is_empty() {
                         closed = true;
                         break;
@@ -532,6 +531,12 @@ impl IRBuilder {
         // Copy all arguments to stack, and add them to symbol table.
         let init_bb = add_bb!(self, f_handle);
 
+        let syms_backup = f
+            .params
+            .iter()
+            .map(|p| (p.name.0.clone(), self.syms.get(&p.name.0).copied()))
+            .collect::<Vec<_>>();
+
         for i in 0..f.params.len() {
             let arg_val = self.prog.func(f_handle).params()[i];
             let alloc = new_value!(self, f_handle).alloc(Type::get_i32());
@@ -557,6 +562,17 @@ impl IRBuilder {
                     let zero = new_value!(self, f_handle).integer(0);
                     let ret = new_value!(self, f_handle).ret(Some(zero));
                     add_insn!(self, f_handle, bb, [ret]);
+                }
+            }
+        }
+
+        for (name, val) in syms_backup {
+            match val {
+                Some(v) => {
+                    self.syms.insert(name, v);
+                }
+                None => {
+                    self.syms.remove(&name);
                 }
             }
         }
