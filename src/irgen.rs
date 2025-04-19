@@ -613,6 +613,7 @@ impl IRBuilder {
                         // TODO: global array
                         let zeros = self.prog.new_value().zero_init(Type::get_i32());
                         let alloc = self.prog.new_value().global_alloc(zeros);
+                        self.prog.set_value_name(alloc, Some(String::from("@") + &v.name.0));
                         self.syms
                             .insert(v.name.0.clone(), SymbolTableEntry::Var(alloc));
 
