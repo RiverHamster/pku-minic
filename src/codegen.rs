@@ -1,6 +1,17 @@
 use core::panic;
-use koopa::ir::{dfg::DataFlowGraph, *};
+use koopa::ir::*;
 use std::{collections::HashMap, io};
+
+use stack::{load_stack, stack_size, write_stack, StackManager};
+use util::{align, flatten_aggregate_const};
+
+use crate::codegen::{
+    stack::{load_addr, load_val, store_val},
+    util::{flatten_local_aggregate, get_type},
+};
+
+mod stack;
+mod util;
 
 const RV_ADDI_LIMIT: usize = 2047;
 const RV_OFFSET_LIMIT: usize = 2047;
@@ -10,112 +21,15 @@ const RV_N_ARGREG: usize = 8;
 
 struct SimpleRISCVBuilder<W: io::Write> {
     writer: W,
-}
-
-#[derive(Debug)]
-struct StackSize {
-    alloc: usize,
-    val: usize,
-    arg_cons: usize,
-    save_regs: usize,
-    save_ra: bool,
-}
-
-/// calculate the (stack size, size of values) of a function
-fn stack_size(prog: &Program, f: Function) -> StackSize {
-    let mut s: StackSize = StackSize {
-        alloc: 0,
-        val: 0,
-        arg_cons: 0,
-        save_regs: 0,
-        save_ra: false,
-    };
-    for (_, v) in prog.func(f).dfg().values() {
-        s.val += v.ty().size();
-        eprintln!("Value type {:?} size {}", v.ty(), v.ty().size());
-        match v.kind() {
-            ValueKind::Alloc(_) => match v.ty().kind() {
-                TypeKind::Pointer(t) => {
-                    s.alloc += t.size();
-                }
-                _ => panic!("alloc value must be a pointer"),
-            },
-            ValueKind::Call(c) => {
-                s.arg_cons = s.arg_cons.max(RV_WORD_SIZE * c.args().len());
-                // Save RA.
-                s.save_regs = RV_WORD_SIZE;
-                s.save_ra = true;
-            }
-            _ => {}
-        }
-    }
-    s
-}
-
-fn align(size: usize, align: usize) -> usize {
-    (size + align - 1) / align * align
-}
-
-struct StackManager {
-    offsets: HashMap<Value, usize>,
-    bound: usize,
-    deref: bool,
-}
-
-impl StackManager {
-    fn new(base: usize, deref: bool) -> Self {
-        Self {
-            offsets: HashMap::new(),
-            bound: base,
-            deref,
-        }
-    }
-
-    fn get(&mut self, v: Value, dfg: &DataFlowGraph) -> usize {
-        // increment the bound to allocate, or return the value
-        self.offsets.get(&v).copied().unwrap_or_else(|| {
-            let pos = self.bound;
-            let ty = dfg.value(v).ty();
-            let size = if self.deref {
-                match ty.kind() {
-                    TypeKind::Pointer(t) => t.size(),
-                    _ => panic!("Deref stack manager must manage pointers"),
-                }
-            } else {
-                ty.size()
-            };
-            // eprintln!("allocated value type {:?} size {}, bound {}", dfg.value(v).ty(), dfg.value(v).ty().size(), self.bound);
-            self.bound += size;
-            self.offsets.insert(v, pos);
-            pos
-        })
-    }
-}
-
-fn load_stack(writer: &mut impl io::Write, stack_offset: usize, reg: &str) {
-    if stack_offset > RV_OFFSET_LIMIT {
-        writeln!(writer, "  li {reg}, {stack_offset}").unwrap();
-        writeln!(writer, "  add {reg}, sp, {reg}").unwrap();
-        writeln!(writer, "  lw {reg}, 0({reg})").unwrap();
-    } else {
-        writeln!(writer, "  lw {reg}, {stack_offset}(sp)").unwrap();
-    }
-}
-
-/// WARNING: overwrites t2
-fn write_stack(writer: &mut impl io::Write, stack_offset: usize, reg: &str) {
-    if stack_offset > RV_OFFSET_LIMIT {
-        writeln!(writer, "  li t2, {}", stack_offset).unwrap();
-        writeln!(writer, "  add t2, sp, t2").unwrap();
-        writeln!(writer, "  sw {reg}, 0(t2)").unwrap();
-    } else {
-        writeln!(writer, "  sw {reg}, {stack_offset}(sp)").unwrap();
-    }
+    long_branch_label: usize,
 }
 
 impl<W: io::Write> SimpleRISCVBuilder<W> {
     fn new(writer: W) -> Self {
-        Self { writer }
+        Self {
+            writer,
+            long_branch_label: 0,
+        }
     }
 
     fn add_func(&mut self, prog: &Program, f_handle: Function) {
@@ -137,12 +51,12 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
             stack.alloc + stack.val + stack.arg_cons + stack.save_regs,
             16,
         );
-        eprintln!(
-            "add_func {}, stack {:?}, allocation {}",
-            f.name(),
-            stack,
-            stack_size
-        );
+        // eprintln!(
+        //     "add_func {}, stack {:?}, allocation {}",
+        //     f.name(),
+        //     stack,
+        //     stack_size
+        // );
 
         if stack_size > RV_ADDI_LIMIT {
             writeln!(self.writer, "  li t0, -{}", stack_size).unwrap();
@@ -183,55 +97,133 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                     // pre-allocated
                     ValueKind::Alloc(_) => {}
                     ValueKind::Load(l) => {
+                        let pos = stk_val.get(*val_handle, dfg);
                         if l.src().is_global() {
-                            // Global: load by name
-                            let val = prog.borrow_value(l.src());
-                            let name =
-                                &val.name().as_ref().expect("global var must have a name")[1..];
-                            let val_off = stk_val.get(*val_handle, dfg);
-                            writeln!(&mut self.writer, "  la t0, {name}").unwrap();
-                            writeln!(&mut self.writer, "  lw t0, 0(t0)").unwrap();
-                            write_stack(&mut self.writer, val_off, "t0");
-                            // writeln!(&mut self.writer, "  sw t0, {}(sp)", val_off).unwrap();
+                            load_val(
+                                &mut self.writer,
+                                l.src(),
+                                prog,
+                                dfg,
+                                "t0",
+                                &mut stk_val,
+                                &mut stk_var,
+                            );
                         } else {
-                            let src_off = stk_var.get(l.src(), dfg);
-                            let pos = stk_val.get(*val_handle, dfg);
-                            load_stack(&mut self.writer, src_off, "t0");
-                            write_stack(&mut self.writer, pos, "t0");
+                            let src_data = dfg.value(l.src());
+                            match src_data.kind() {
+                                ValueKind::Alloc(_) => {
+                                    let src_off = stk_var.get(l.src(), dfg);
+                                    load_stack(&mut self.writer, src_off, "t0");
+                                }
+                                ValueKind::GetPtr(_) | ValueKind::GetElemPtr(_) => {
+                                    load_val(
+                                        &mut self.writer,
+                                        l.src(),
+                                        prog,
+                                        dfg,
+                                        "t0",
+                                        &mut stk_val,
+                                        &mut stk_var,
+                                    );
+                                }
+                                _ => panic!("unsupported load source {:?}", src_data.kind()),
+                            }
                         }
+                        write_stack(&mut self.writer, pos, "t0");
                     }
                     // only Store can access function arguments, guaranteed by the IR generator
                     ValueKind::Store(s) => {
                         if s.dest().is_global() {
                             let src_off = stk_val.get(s.value(), dfg);
                             load_stack(&mut self.writer, src_off, "t0");
-                            // Global: store by name
-                            let val = prog.borrow_value(s.dest());
-                            let name =
-                                &val.name().as_ref().expect("global var must have a name")[1..];
-                            // overwrites t2
-                            writeln!(&mut self.writer, "  la t2, {}", name).unwrap();
-                            writeln!(&mut self.writer, "  sw t0, 0(t2)").unwrap();
+                            store_val(
+                                &mut self.writer,
+                                s.dest(),
+                                prog,
+                                dfg,
+                                "t0",
+                                "t2",
+                                &mut stk_val,
+                                &mut stk_var,
+                            );
                         } else {
-                            let dst_off = stk_var.get(s.dest(), dfg);
-                            let idx = arg_idx.get(&s.value());
-                            match idx {
-                                // argument
-                                Some(i) => {
-                                    if *i < RV_N_ARGREG {
-                                        write_stack(&mut self.writer, dst_off, &format!("a{}", i));
-                                    } else {
-                                        let src_off = RV_WORD_SIZE * (*i - RV_N_ARGREG) + stack_size;
-                                        load_stack(&mut self.writer, src_off, "t0");
-                                        write_stack(&mut self.writer, dst_off, "t0");
+                            let dest_data = dfg.value(s.dest());
+                            match dest_data.kind() {
+                                ValueKind::Alloc(_) => {
+                                    let dst_off = stk_var.get(s.dest(), dfg);
+                                    let idx = arg_idx.get(&s.value());
+                                    match idx {
+                                        // argument
+                                        Some(i) => {
+                                            if *i < RV_N_ARGREG {
+                                                write_stack(
+                                                    &mut self.writer,
+                                                    dst_off,
+                                                    &format!("a{}", i),
+                                                );
+                                            } else {
+                                                let src_off =
+                                                    RV_WORD_SIZE * (*i - RV_N_ARGREG) + stack_size;
+                                                load_stack(&mut self.writer, src_off, "t0");
+                                                write_stack(&mut self.writer, dst_off, "t0");
+                                            }
+                                        }
+                                        // local value (on stack)
+                                        None => {
+                                            let s_value_data = dfg.value(s.value());
+                                            match s_value_data.kind() {
+                                                ValueKind::Aggregate(_) => {
+                                                    // We assume `dest` is Alloc.
+                                                    let vals =
+                                                        flatten_local_aggregate(dfg, s.value());
+                                                    for (i, v) in vals.iter().enumerate() {
+                                                        let v_data = if v.is_global() {
+                                                            prog.borrow_value(*v).clone()
+                                                        } else {
+                                                            dfg.value(*v).clone()
+                                                        };
+                                                        assert!(v_data.ty().is_i32());
+                                                        load_val(
+                                                            &mut self.writer,
+                                                            *v,
+                                                            prog,
+                                                            dfg,
+                                                            "t0",
+                                                            &mut stk_val,
+                                                            &mut stk_var,
+                                                        );
+                                                        write_stack(
+                                                            &mut self.writer,
+                                                            dst_off + i * RV_WORD_SIZE,
+                                                            "t0",
+                                                        );
+                                                    }
+                                                }
+                                                _ => {
+                                                    // We does not type-check here.
+                                                    let src_off = stk_val.get(s.value(), dfg);
+                                                    load_stack(&mut self.writer, src_off, "t0");
+                                                    write_stack(&mut self.writer, dst_off, "t0");
+                                                }
+                                            };
+                                        }
                                     }
                                 }
-                                // local value (on stack)
-                                None => {
+                                ValueKind::GetPtr(_) | ValueKind::GetElemPtr(_) => {
                                     let src_off = stk_val.get(s.value(), dfg);
                                     load_stack(&mut self.writer, src_off, "t0");
-                                    write_stack(&mut self.writer, dst_off, "t0");
+                                    store_val(
+                                        &mut self.writer,
+                                        s.dest(),
+                                        prog,
+                                        dfg,
+                                        "t0",
+                                        "t2",
+                                        &mut stk_val,
+                                        &mut stk_var,
+                                    );
                                 }
+                                _ => panic!("unsupported store destination {:?}", dest_data.kind()),
                             }
                         }
                     }
@@ -305,18 +297,27 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
 
                         let cond_off = stk_val.get(cond, dfg);
                         load_stack(&mut self.writer, cond_off, "t0");
-                        writeln!(
-                            self.writer,
-                            "  bnez t0, L{}",
-                            &dfg.bb(target_true).name().as_ref().unwrap()[1..]
-                        )
-                        .unwrap();
-                        writeln!(
-                            self.writer,
-                            "  j L{}",
-                            &dfg.bb(target_false).name().as_ref().unwrap()[1..]
-                        )
-                        .unwrap();
+                        // writeln!(
+                        //     self.writer,
+                        //     "  bnez t0, L{}",
+                        //     &dfg.bb(target_true).name().as_ref().unwrap()[1..]
+                        // )
+                        // .unwrap();
+                        // writeln!(
+                        //     self.writer,
+                        //     "  j L{}",
+                        //     &dfg.bb(target_false).name().as_ref().unwrap()[1..]
+                        // )
+                        // .unwrap();
+
+                        // Use long format to handle large functions.
+                        let t_true = &dfg.bb(target_true).name().as_ref().unwrap()[1..];
+                        let t_false = &dfg.bb(target_false).name().as_ref().unwrap()[1..];
+                        writeln!(self.writer, "  bnez t0, B{}", self.long_branch_label).unwrap();
+                        writeln!(self.writer, "  j L{}", t_false).unwrap();
+                        writeln!(self.writer, "B{}: j L{}", self.long_branch_label, t_true)
+                            .unwrap();
+                        self.long_branch_label += 1;
                     }
                     ValueKind::Call(c) => {
                         for (i, arg) in c.args().iter().enumerate() {
@@ -340,6 +341,61 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                             panic!("unsupported return type {:?}", val.ty());
                         }
                     }
+                    // GetElemPtr and GetPtr are essentially the same. They differ only in typing.
+                    ValueKind::GetElemPtr(gep) => {
+                        load_addr(
+                            &mut self.writer,
+                            gep.src(),
+                            prog,
+                            dfg,
+                            "t0",
+                            &mut stk_val,
+                            &mut stk_var,
+                        );
+                        let idx_off = stk_val.get(gep.index(), dfg);
+                        load_stack(&mut self.writer, idx_off, "t1");
+                        let src_ty = get_type(prog, dfg, gep.src());
+                        match src_ty.kind() {
+                            TypeKind::Pointer(t) => {
+                                let elem_size = if let TypeKind::Array(et, _n) = t.kind() {
+                                    et.size()
+                                } else {
+                                    panic!("GEP on non-array pointer");
+                                };
+                                writeln!(&mut self.writer, "  li t2, {elem_size}").unwrap();
+                                writeln!(&mut self.writer, "  mul t1, t1, t2").unwrap();
+                                writeln!(&mut self.writer, "  add t0, t0, t1").unwrap();
+                                let val_off = stk_val.get(*val_handle, dfg);
+                                write_stack(&mut self.writer, val_off, "t0");
+                            }
+                            _ => panic!("GEP on non-pointer"),
+                        }
+                    }
+                    ValueKind::GetPtr(gp) => {
+                        load_addr(
+                            &mut self.writer,
+                            gp.src(),
+                            prog,
+                            dfg,
+                            "t0",
+                            &mut stk_val,
+                            &mut stk_var,
+                        );
+                        let idx_off = stk_val.get(gp.index(), dfg);
+                        load_stack(&mut self.writer, idx_off, "t1");
+                        let src_ty = dfg.value(gp.src()).ty();
+                        match src_ty.kind() {
+                            TypeKind::Pointer(t) => {
+                                let size = t.size();
+                                writeln!(&mut self.writer, "  li t2, {}", size).unwrap();
+                                writeln!(&mut self.writer, "  mul t1, t1, t2").unwrap();
+                                writeln!(&mut self.writer, "  add t0, t0, t1").unwrap();
+                                let val_off = stk_val.get(*val_handle, dfg);
+                                write_stack(&mut self.writer, val_off, "t0");
+                            }
+                            _ => panic!("GEP on non-pointer"),
+                        }
+                    }
                     _ => unimplemented!("value kind {:?} not implemented", val.kind()),
                 }
             }
@@ -354,17 +410,33 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
         writeln!(&mut self.writer, "  .data").unwrap();
         for v in globals {
             let val = prog.borrow_value(*v);
-            if val.kind().is_global_alloc() {
-                let name = &val.name().as_ref().expect("global var must have a name")[1..];
-                let size = match val.ty().kind() {
-                    TypeKind::Pointer(t) => t.size(),
-                    _ => panic!("global alloc must be a pointer"),
-                };
-                writeln!(&mut self.writer, "  .globl {name}\n{name}:\n  .zero {size}").unwrap();
-                writeln!(&mut self.writer).unwrap();
-            } else if val.kind().is_const() {
-                panic!("global const must be a global alloc");
-                // TODO: global arrays
+            match val.kind() {
+                ValueKind::GlobalAlloc(ga) => {
+                    let name = &val.name().as_ref().expect("global var must have a name")[1..];
+                    let size = match val.ty().kind() {
+                        TypeKind::Pointer(t) => t.size(),
+                        _ => panic!("global alloc must be a pointer"),
+                    };
+                    // writeln!(&mut self.writer, "  .globl {name}\n{name}:\n  .zero {size}").unwrap();
+                    // writeln!(&mut self.writer).unwrap();
+                    writeln!(&mut self.writer, "  .globl {name}\n{name}:").unwrap();
+                    let init = prog.borrow_value(ga.init());
+                    match init.kind() {
+                        ValueKind::ZeroInit(_) => {
+                            // zero-initialized global variable
+                            writeln!(&mut self.writer, "  .zero {}", size).unwrap();
+                        }
+                        ValueKind::Aggregate(_) => {
+                            let vals = flatten_aggregate_const(prog, ga.init());
+                            assert!(vals.len() * 4 == size, "aggregate size mismatch");
+                            for v in vals {
+                                writeln!(&mut self.writer, "  .word {}", v as u32).unwrap();
+                            }
+                        }
+                        _ => panic!("invalid global variable initializer {:?}", init.kind()),
+                    }
+                }
+                _ => panic!("global variable must be global_alloc"),
             }
         }
     }
@@ -380,6 +452,7 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
 }
 
 pub fn gen_riscv_simple<W: io::Write>(prog: &Program, writer: W) {
+    koopa::ir::Type::set_ptr_size(4);
     let mut builder = SimpleRISCVBuilder::new(writer);
     builder.add_program(prog);
 }

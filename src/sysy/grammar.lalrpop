@@ -48,7 +48,11 @@ pub Term: ast::Expr = {
             name: name,
             args: args,
         }
-    }
+    },
+}
+
+pub AllExpr: ast::Expr = {
+    <e: Expr> => e,
 }
 
 pub Expr: ast::Expr = {
@@ -57,7 +61,7 @@ pub Expr: ast::Expr = {
     <t: Term> => t,
 
     #[precedence(level="1")] #[assoc(side="left")]
-    <e: Expr> "[" <i: Expr> "]" => ast::Expr::BinaryExpr {
+    <e: Expr> "[" <i: AllExpr> "]" => ast::Expr::BinaryExpr {
         op: ast::BinaryOp::Index,
         lhs: Box::new(e),
         rhs: Box::new(i),
@@ -246,9 +250,10 @@ pub Decl: ast::Decl = {
 }
 
 pub FuncParam: ast::FuncParam = {
-    <t: BaseType> <name: Ident> => ast::FuncParam {
+    <t: BaseType> <name: Ident> <dims: ("[" <Expr?> "]")*> => ast::FuncParam {
         ty: t,
         name: name,
+        dims: dims,
     },
 }
 

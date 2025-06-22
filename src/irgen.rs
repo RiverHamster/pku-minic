@@ -1,16 +1,27 @@
-use crate::sysy::ast::{self, Expr};
+use crate::{
+    irgen::util::koopa_array_dims,
+    sysy::ast::{self, Expr, VarDef},
+};
 use core::panic;
 use std::collections::HashMap;
 
 use koopa::ir::{builder_traits::*, *};
 
 pub mod libsysy;
+pub mod lvalue;
+pub mod util;
+#[macro_use]
+pub(self) mod macros;
 
 #[derive(Debug, Clone, Copy)]
-enum SymbolTableEntry {
+pub(self) enum SymbolTableEntry {
     Const(i32),
-    // Alloc Value, which stores the variable
-    Var(Value),
+    /// Alloc Value, which stores the variable.
+    /// Const arrays are stored like variables.
+    Var {
+        v: Value,
+        is_const: bool,
+    },
 }
 
 /// global states for processing the AST
@@ -22,43 +33,6 @@ pub struct IRBuilder {
     funcs: HashMap<String, Function>,
     /// The function to initialize global variables. Called before main.
     init_global: Option<(Function, BasicBlock)>,
-}
-
-macro_rules! add_insn {
-    ($module:ident, $f_handle:expr, $bb:expr, $insn:expr) => {
-        $module
-            .prog
-            .func_mut($f_handle)
-            .layout_mut()
-            .bb_mut($bb)
-            .insts_mut()
-            .extend($insn);
-    };
-}
-
-macro_rules! new_value {
-    ($module:ident, $f_handle:expr) => {
-        $module.prog.func_mut($f_handle).dfg_mut().new_value()
-    };
-}
-
-macro_rules! add_bb {
-    ($module:ident, $f_handle:expr) => {{
-        let bb = $module
-            .prog
-            .func_mut($f_handle)
-            .dfg_mut()
-            .new_bb()
-            .basic_block(Some(String::from("%") + &$module.bb_idx.to_string()));
-        $module
-            .prog
-            .func_mut($f_handle)
-            .layout_mut()
-            .bbs_mut()
-            .extend([bb]);
-        $module.bb_idx += 1;
-        bb
-    }};
 }
 
 #[derive(Clone, Copy)]
@@ -80,22 +54,34 @@ impl IRBuilder {
         }
     }
 
+    pub fn get_type(&self, v: &Value, f_handle: Function) -> Type {
+        if v.is_global() {
+            self.prog.borrow_value(*v).ty().clone()
+        } else {
+            self.prog.func(f_handle).dfg().value(*v).ty().clone()
+        }
+    }
+
     /// Add instructions to evaluate `e` in basic block `bb`.
     /// Returns the value of `e` and the converging basic block. Basic blocks
     /// may diverge due to short-circuit evaluation.
+    #[must_use]
     fn eval_expr(
         &mut self,
         f_handle: Function,
         bb: BasicBlock,
         e: &ast::Expr,
     ) -> (Value, BasicBlock) {
+        // eprintln!("eval_expr {:?}", e);
         // let dfg = self.prog.func(f_handle).dfg_mut();
         let zero = new_value!(self, f_handle).integer(0);
+        // TODO: type_check?
         match e {
             Expr::LitInt(i) => (new_value!(self, f_handle).integer(i.0), bb),
             Expr::UnaryExpr { op, expr } => {
                 // Overwrite the current bb.
                 let (expr_val, bb) = self.eval_expr(f_handle, bb, expr);
+
                 let insn = match op {
                     ast::UnaryOp::Neg => {
                         new_value!(self, f_handle).binary(BinaryOp::Sub, zero, expr_val)
@@ -130,7 +116,13 @@ impl IRBuilder {
                     Neq => BinaryOp::NotEq,
                     LAnd => BinaryOp::And,
                     LOr => BinaryOp::Or,
-                    Index => unimplemented!(),
+                    // Get the array lvalue first. Then convert to rvalue.
+                    Index => {
+                        let (lval, bb1) = self.eval_lvalue(f_handle, bb, e);
+                        let load = new_value!(self, f_handle).load(lval.ptr);
+                        add_insn!(self, f_handle, bb1, [load]);
+                        return (load, bb1);
+                    }
                 };
 
                 // Overwrite the current bb.
@@ -192,7 +184,10 @@ impl IRBuilder {
                 match self.syms.get(&ident.0) {
                     Some(Const(i)) => (new_value!(self, f_handle).integer(*i), bb),
                     // Some(Global(val)) => *val,
-                    Some(Var(val)) => {
+                    Some(Var {
+                        v: val,
+                        is_const: _,
+                    }) => {
                         let loaded = new_value!(self, f_handle).load(*val);
                         add_insn!(self, f_handle, bb, [loaded]);
                         (loaded, bb)
@@ -202,26 +197,208 @@ impl IRBuilder {
             }
             Expr::FuncCall { name, args } => {
                 let mut bb = bb;
-                let vals: Vec<_> = args
-                    .iter()
-                    .map(|e| {
-                        let (val, new_bb) = self.eval_expr(f_handle, bb, e);
-                        bb = new_bb;
-                        val
-                    })
-                    .collect();
+                // let vals: Vec<_> = args
+                //     .iter()
+                //     .map(|e| {
+                //         let (val, new_bb) = self.eval_expr(f_handle, bb, e);
+                //         bb = new_bb;
+                //         val
+                //     })
+                //     .collect();
+                // TODO: Array parameter is not rvalue. Evaluate with eval_lvalue.
 
                 let callee = self
                     .funcs
                     .get(&name.0)
                     .unwrap_or_else(|| panic!("undefined function: {}", name.0))
                     .clone();
+
+                let callee_kind = self.prog.func(callee).ty().kind().clone();
+                let args_type = match callee_kind {
+                    TypeKind::Function(types, _) => types,
+                    _ => unreachable!(),
+                };
+                let vals: Vec<_> = args
+                    .iter()
+                    .zip(args_type.iter())
+                    .map(|(e, ty)| {
+                        if ty.is_i32() {
+                            let (val, new_bb) = self.eval_expr(f_handle, bb, e);
+                            bb = new_bb;
+                            val
+                        } else {
+                            let (lval, new_bb) = self.eval_lvalue(f_handle, bb, e);
+                            bb = new_bb;
+                            let lval_ty = self.get_type(&lval.ptr, f_handle);
+                            // lval local array: *[i32; N] => *i32
+                            // lval array param: **i32 => *i32
+                            let deref_ty = match lval_ty.kind() {
+                                TypeKind::Pointer(ty) => ty,
+                                _ => panic!("lvalue must be a pointer"),
+                            };
+                            let arg = match deref_ty.kind() {
+                                TypeKind::Array(_, _) => {
+                                    // Convert sized array into a pointer.
+                                    new_value!(self, f_handle).get_elem_ptr(lval.ptr, zero)
+                                },
+                                TypeKind::Pointer(_) => {
+                                    new_value!(self, f_handle).load(lval.ptr)
+                                }
+                                _ => panic!("array parameter must be a pointer or array"),
+                            };
+                            add_insn!(self, f_handle, bb, [arg]);
+                            arg
+                        }
+                    })
+                    .collect();
+
                 let call = new_value!(self, f_handle).call(callee, vals);
 
                 add_insn!(self, f_handle, bb, [call]);
                 (call, bb)
             }
         }
+    }
+    pub fn into_aggregate<'a>(
+        &mut self,
+        ty: &Type,
+        vals: &mut impl Iterator<Item = &'a Value>,
+        make_aggregate: &mut impl FnMut(&mut IRBuilder, Vec<Value>) -> Value,
+    ) -> Value {
+        match ty.kind() {
+            TypeKind::Int32 => vals.next().unwrap().clone(),
+            TypeKind::Array(elem_ty, size) => {
+                let mut children = Vec::with_capacity(*size);
+                for _ in 0..*size {
+                    children.push(self.into_aggregate(elem_ty, vals, make_aggregate));
+                }
+                make_aggregate(self, children)
+            }
+            _ => panic!("into_aggregate should produce array types"),
+        }
+    }
+
+    #[must_use]
+    fn eval_array_init_impl(
+        &mut self,
+        mut env: Option<(Function, BasicBlock)>,
+        ie: &ast::InitExpr,
+        ty: &Type,
+        zero: Value,
+        is_const: bool,
+    ) -> (Vec<Value>, Option<BasicBlock>) {
+        // eprintln!("eval_array_init_impl ty {:?} ie {:?}", ty, ie);
+        match ty.kind() {
+            TypeKind::Int32 => {
+                if let ast::InitExpr::Scalar(e) = ie {
+                    // let (v, bb) = if let Some((f_handle, bb)) = env {
+                    //     let (v, bb) = self.eval_expr(f_handle, bb, e);
+                    //     (v, Some(bb))
+                    // } else {
+                    //     let evaluated = self.eval_i32_const(e);
+                    //     (self.prog.new_value().integer(evaluated), env.map(|(_, bb)| bb))
+                    // };
+                    let (v, bb) = if is_const {
+                        let evaluated = self.eval_i32_const(e);
+                        if let Some((f_handle, bb)) = &env {
+                            (
+                                new_value!(self, *f_handle).integer(evaluated),
+                                Some(bb.clone()),
+                            )
+                        } else {
+                            (self.prog.new_value().integer(evaluated), None)
+                        }
+                    } else {
+                        let (v, bb) = env.unwrap();
+                        let (v, new_bb) = self.eval_expr(v, bb, e);
+                        (v, Some(new_bb))
+                    };
+                    (vec![v], bb)
+                } else {
+                    panic!("int not initialized with scalar");
+                }
+            }
+            TypeKind::Array(elem_ty, size) => {
+                // let dims = koopa_array_dims(&ty);
+                let elem_dims = koopa_array_dims(&elem_ty);
+                let total_size = size * elem_dims.iter().product::<usize>();
+                let ies = {
+                    if let ast::InitExpr::Array(ies) = ie {
+                        ies
+                    } else {
+                        panic!("array not initialized with aggregate");
+                    }
+                };
+
+                let mut elems = vec![];
+                for elem in ies {
+                    match elem {
+                        ast::InitExpr::Scalar(e) => {
+                            let v = if let Some((f_handle, bb)) = &mut env {
+                                let (v, new_bb) = self.eval_expr(*f_handle, *bb, e);
+                                *bb = new_bb;
+                                v
+                            } else {
+                                let evaluated = self.eval_i32_const(e);
+                                let v = self.prog.new_value().integer(evaluated);
+                                v
+                            };
+                            elems.push(v);
+                        }
+                        ast::InitExpr::Array(_) => {
+                            let mut prod = 1_usize;
+                            let mut agg_type = Type::get_i32();
+                            for dim in elem_dims.iter().rev() {
+                                prod *= dim;
+                                if elems.len() % prod == 0 {
+                                    agg_type = Type::get_array(agg_type, *dim);
+                                } else {
+                                    break;
+                                }
+                            }
+                            let (mut v, new_bb) =
+                                self.eval_array_init_impl(env, elem, &agg_type, zero, is_const);
+                            if let Some(new_bb) = new_bb {
+                                if let Some((_, bb)) = &mut env {
+                                    *bb = new_bb;
+                                } else {
+                                    unreachable!();
+                                }
+                            }
+                            elems.append(&mut v);
+                        }
+                    }
+                }
+
+                assert!(elems.len() <= total_size);
+
+                while elems.len() < total_size {
+                    elems.push(zero);
+                }
+
+                (elems, env.map(|(_, bb)| bb))
+            }
+            _ => {
+                panic!("{:?} unsupported in initializers", ty);
+            }
+        }
+    }
+
+    /// Translate an AST InitExpr into an aggregate value.
+    /// Evaluate to a variable if env is provided, const otherwise.
+    fn eval_array_init(
+        &mut self,
+        env: Option<(Function, BasicBlock)>,
+        ie: &ast::InitExpr,
+        ty: &Type,
+        make_aggregate: &mut impl FnMut(&mut IRBuilder, Vec<Value>) -> Value,
+        zero: Value,
+        is_const: bool,
+    ) -> (Value, Option<BasicBlock>) {
+        // eprintln!("eval_array_init ty {:?} ie {:?}", ty, ie);
+        let (vals, bb) = self.eval_array_init_impl(env, ie, ty, zero, is_const);
+        let v = self.into_aggregate(ty, &mut vals.iter(), make_aggregate);
+        return (v, bb);
     }
 
     fn eval_i32_const(&self, e: &ast::Expr) -> i32 {
@@ -291,31 +468,17 @@ impl IRBuilder {
                 };
                 vec![]
             }
-            ast::Stmt::Assign(lhs, rhs) => match lhs {
-                ast::Expr::Ident(ident) => {
-                    let lval_entry = self
-                        .syms
-                        .get(&ident.0)
-                        .expect(&format!("undefined symbol: {}", ident.0))
-                        .clone();
-                    let (rval, bb) = self.eval_expr(f_handle, bb, rhs).clone();
-                    if let SymbolTableEntry::Var(var) = lval_entry {
-                        let store = new_value!(self, f_handle).store(rval, var);
-                        add_insn!(self, f_handle, bb, [store]);
-                    } else {
-                        panic!("assign to non-lvalue");
-                    }
+            ast::Stmt::Assign(lhs, rhs) => {
+                // Refactor: general lvalue
+                let (lval, bb1) = self.eval_lvalue(f_handle, bb, lhs);
+                assert!(!lval.is_const, "Assignment to const lvalue");
+                let (rval, bb2) = self.eval_expr(f_handle, bb1, rhs);
 
-                    // eprintln!("returned bb {:?}", bb);
-                    vec![bb]
-                }
-                ast::Expr::BinaryExpr {
-                    op: ast::BinaryOp::Index,
-                    lhs: _base,
-                    rhs: _index,
-                } => unimplemented!("array index assign"),
-                _ => panic!("assign to non-lvalue"),
-            },
+                // TODO: type check?
+                let store = new_value!(self, f_handle).store(rval, lval.ptr);
+                add_insn!(self, f_handle, bb2, [store]);
+                vec![bb2]
+            }
             ast::Stmt::Block(b) => self.add_block(f_handle, Some(bb), lenv, b),
             ast::Stmt::Empty => vec![bb],
             ast::Stmt::Expr(e) => {
@@ -435,58 +598,121 @@ impl IRBuilder {
                         bbs[0]
                     }
                 }
-                ast::BlockItem::Decl(decl) => match decl {
-                    ast::Decl::Const(d) => match d {
-                        ast::VarDecl {
-                            base_ty: ast::BaseType::Int,
-                            vars,
-                        } => {
-                            for v in vars {
-                                let val = match &v.init {
-                                    Some(ast::InitExpr::Scalar(e)) => self.eval_i32_const(e),
-                                    Some(ast::InitExpr::Array(_)) => unimplemented!(),
-                                    None => panic!("const {} uninitialized", v.name.0),
-                                };
-                                self.syms
-                                    .insert(v.name.0.clone(), SymbolTableEntry::Const(val));
-                            }
+                ast::BlockItem::Decl(decl) => {
+                    #[must_use]
+                    fn add_array(
+                        base_ty: ast::BaseType,
+                        d: &VarDef,
+                        is_const: bool,
+                        irb: &mut IRBuilder,
+                        f_handle: Function,
+                        bb: BasicBlock,
+                    ) -> BasicBlock {
+                        let base_ty: Type = match base_ty {
+                            ast::BaseType::Int => Type::get_i32(),
+                            ast::BaseType::Void => panic!("void variable"),
+                        };
+                        assert!(!d.shape.is_empty(), "add_array on scalar");
+                        let ty = d.shape.iter().rev().fold(base_ty, |ty, dim_expr| {
+                            Type::get_array(ty, irb.eval_i32_const(dim_expr) as usize)
+                        });
+                        let alloc = new_value!(irb, f_handle).alloc(ty.clone());
+                        add_insn!(irb, f_handle, bb, [alloc]);
+                        irb.syms.insert(
+                            d.name.0.clone(),
+                            SymbolTableEntry::Var { v: alloc, is_const },
+                        );
+                        if let Some(ie) = &d.init {
+                            let zero = new_value!(irb, f_handle).integer(0);
+                            let (agg, new_bb) = irb.eval_array_init(
+                                Some((f_handle, bb)),
+                                &ie,
+                                &ty,
+                                &mut |irb, vs| new_value!(irb, f_handle).aggregate(vs),
+                                zero,
+                                is_const,
+                            );
+                            // Constant does not yield bb
+                            let new_bb = new_bb.unwrap_or(bb);
+                            let store = new_value!(irb, f_handle).store(agg, alloc);
+                            add_insn!(irb, f_handle, new_bb, [store]);
+                            new_bb
+                        } else {
+                            assert!(!is_const, "const array uninitialized");
+                            bb
                         }
-                        _ => panic!("base_ty of Decl must be int"),
-                    },
-                    ast::Decl::Var(d) => {
-                        for v in &d.vars {
-                            let base_ty = match d.base_ty {
-                                ast::BaseType::Int => Type::get_i32(),
-                                ast::BaseType::Void => panic!("void variable"),
-                            };
-                            let ty = v.shape.iter().rev().fold(base_ty, |ty, dim_expr| {
-                                Type::get_array(ty, self.eval_i32_const(dim_expr) as usize)
-                            });
-                            let alloc = new_value!(self, f_handle).alloc(ty);
-                            add_insn!(self, f_handle, bb, [alloc]);
-                            self.syms
-                                .insert(v.name.0.clone(), SymbolTableEntry::Var(alloc));
-                            if let Some(init) = &v.init {
-                                match init {
-                                    ast::InitExpr::Scalar(e) => {
-                                        let bbs = self.add_stmt(
-                                            f_handle,
-                                            bb,
-                                            lenv,
-                                            &ast::Stmt::Assign(
-                                                ast::Expr::Ident(v.name.clone()),
-                                                e.clone(),
-                                            ),
-                                        );
-                                        assert!(bbs.len() == 1);
-                                        bb = bbs[0];
+                    }
+                    match decl {
+                        ast::Decl::Const(d) => match d {
+                            ast::VarDecl {
+                                base_ty: ast::BaseType::Int,
+                                vars,
+                            } => {
+                                for v in vars {
+                                    let val = match &v.init {
+                                        Some(ast::InitExpr::Scalar(e)) => self.eval_i32_const(e),
+                                        Some(ast::InitExpr::Array(_)) => {
+                                            bb = add_array(
+                                                ast::BaseType::Int,
+                                                v,
+                                                true,
+                                                self,
+                                                f_handle,
+                                                bb,
+                                            );
+                                            continue;
+                                        }
+                                        None => panic!("const {} uninitialized", v.name.0),
+                                    };
+                                    self.syms
+                                        .insert(v.name.0.clone(), SymbolTableEntry::Const(val));
+                                }
+                            }
+                            _ => panic!("base_ty of Decl must be int"),
+                        },
+                        ast::Decl::Var(d) => {
+                            for v in &d.vars {
+                                if !v.shape.is_empty() {
+                                    bb = add_array(d.base_ty, v, false, self, f_handle, bb);
+                                } else {
+                                    let ty = match d.base_ty {
+                                        ast::BaseType::Int => Type::get_i32(),
+                                        ast::BaseType::Void => panic!("void variable"),
+                                    };
+                                    let alloc = new_value!(self, f_handle).alloc(ty);
+                                    add_insn!(self, f_handle, bb, [alloc]);
+                                    self.syms.insert(
+                                        v.name.0.clone(),
+                                        SymbolTableEntry::Var {
+                                            v: alloc,
+                                            is_const: false,
+                                        },
+                                    );
+                                    if let Some(init) = &v.init {
+                                        match init {
+                                            ast::InitExpr::Scalar(e) => {
+                                                let bbs = self.add_stmt(
+                                                    f_handle,
+                                                    bb,
+                                                    lenv,
+                                                    &ast::Stmt::Assign(
+                                                        ast::Expr::Ident(v.name.clone()),
+                                                        e.clone(),
+                                                    ),
+                                                );
+                                                assert!(bbs.len() == 1);
+                                                bb = bbs[0];
+                                            }
+                                            ast::InitExpr::Array(_e) => {
+                                                panic!("array initializer in scalar");
+                                            }
+                                        }
                                     }
-                                    ast::InitExpr::Array(_e) => unimplemented!("array init"),
                                 }
                             }
                         }
                     }
-                },
+                }
             }
         }
 
@@ -516,7 +742,23 @@ impl IRBuilder {
                     (Some(String::from("@") + p.name.0.as_str()), {
                         // TODO: array parameters
                         assert!(p.ty == ast::BaseType::Int);
-                        Type::get_i32()
+                        // Type::get_i32()
+                        if p.dims.is_empty() {
+                            Type::get_i32()
+                        } else {
+                            assert!(
+                                p.dims[0].is_none(),
+                                "First dimension of array parameter must be empty"
+                            );
+                            let mut ty = Type::get_i32();
+                            for dim in p.dims[1..].iter().rev() {
+                                let dim = dim.as_ref().unwrap();
+                                let dim = self.eval_i32_const(dim);
+                                ty = Type::get_array(ty, dim as usize);
+                            }
+                            ty = Type::get_pointer(ty);
+                            ty
+                        }
                     })
                 })
                 .collect(),
@@ -539,11 +781,17 @@ impl IRBuilder {
 
         for i in 0..f.params.len() {
             let arg_val = self.prog.func(f_handle).params()[i];
-            let alloc = new_value!(self, f_handle).alloc(Type::get_i32());
+            let arg_ty = self.get_type(&arg_val, f_handle);
+            let alloc = new_value!(self, f_handle).alloc(arg_ty);
             let store = new_value!(self, f_handle).store(arg_val.clone(), alloc);
             add_insn!(self, f_handle, init_bb, [alloc, store]);
-            self.syms
-                .insert(f.params[i].name.0.clone(), SymbolTableEntry::Var(alloc));
+            self.syms.insert(
+                f.params[i].name.0.clone(),
+                SymbolTableEntry::Var {
+                    v: alloc,
+                    is_const: false,
+                },
+            );
         }
 
         if f.name.0 == "main" {
@@ -579,6 +827,32 @@ impl IRBuilder {
     }
 
     fn add_global_decl(&mut self, d: &ast::Decl) {
+        fn add_array(irb: &mut IRBuilder, v: &ast::VarDef) -> Value {
+            let ty = v.shape.iter().rev().fold(Type::get_i32(), |ty, dim_expr| {
+                Type::get_array(ty, irb.eval_i32_const(dim_expr) as usize)
+            });
+            if let Some(init) = &v.init {
+                let zero = irb.prog.new_value().integer(0);
+                let (agg, _none_bb) = irb.eval_array_init(
+                    None,
+                    init,
+                    &ty,
+                    &mut |irb, vs| irb.prog.new_value().aggregate(vs),
+                    zero,
+                    true,
+                );
+                assert!(_none_bb.is_none());
+                irb.prog.new_value().global_alloc(agg)
+            } else {
+                let zeroinit = irb.prog.new_value().zero_init(ty.clone());
+                irb.prog.new_value().global_alloc(zeroinit)
+            }
+        }
+        fn add_sym(irb: &mut IRBuilder, name: &str, v: Value, is_const: bool) {
+            irb.prog.set_value_name(v, Some(String::from("@") + name));
+            irb.syms
+                .insert(name.into(), SymbolTableEntry::Var { v, is_const });
+        }
         match d {
             ast::Decl::Const(d) => match d {
                 ast::VarDecl {
@@ -588,7 +862,11 @@ impl IRBuilder {
                     for v in vars {
                         let val = match &v.init {
                             Some(ast::InitExpr::Scalar(e)) => self.eval_i32_const(e),
-                            Some(ast::InitExpr::Array(_)) => unimplemented!(),
+                            Some(ast::InitExpr::Array(_)) => {
+                                let alloc = add_array(self, v);
+                                add_sym(self, &v.name.0, alloc, true);
+                                continue;
+                            }
                             None => panic!("const {} uninitialized", v.name.0),
                         };
                         self.syms
@@ -603,32 +881,29 @@ impl IRBuilder {
                     vars,
                 } => {
                     for v in vars {
-                        let base_ty = match d.base_ty {
-                            ast::BaseType::Int => Type::get_i32(),
-                            ast::BaseType::Void => panic!("void variable"),
-                        };
-                        let _ty = v.shape.iter().rev().fold(base_ty, |ty, dim_expr| {
-                            Type::get_array(ty, self.eval_i32_const(dim_expr) as usize)
-                        });
-                        // TODO: global array
-                        let zeros = self.prog.new_value().zero_init(Type::get_i32());
-                        let alloc = self.prog.new_value().global_alloc(zeros);
-                        self.prog.set_value_name(alloc, Some(String::from("@") + &v.name.0));
-                        self.syms
-                            .insert(v.name.0.clone(), SymbolTableEntry::Var(alloc));
+                        if !v.shape.is_empty() {
+                            let alloc = add_array(self, v);
+                            add_sym(self, &v.name.0, alloc, false);
+                        } else {
+                            let zeros = self.prog.new_value().zero_init(Type::get_i32());
+                            let alloc = self.prog.new_value().global_alloc(zeros);
+                            add_sym(self, &v.name.0, alloc, false);
 
-                        if let Some(init) = v.init.as_ref() {
-                            let (init_global, mut bb) = self.init_global.clone().unwrap();
-                            match init {
-                                ast::InitExpr::Scalar(e) => {
-                                    let (val, new_bb) = self.eval_expr(init_global, bb, &e);
-                                    let store = new_value!(self, init_global).store(val, alloc);
-                                    add_insn!(self, init_global, new_bb, [store]);
-                                    bb = new_bb;
+                            if let Some(init) = v.init.as_ref() {
+                                let (init_global, mut bb) = self.init_global.clone().unwrap();
+                                match init {
+                                    ast::InitExpr::Scalar(e) => {
+                                        let (val, new_bb) = self.eval_expr(init_global, bb, &e);
+                                        let store = new_value!(self, init_global).store(val, alloc);
+                                        add_insn!(self, init_global, new_bb, [store]);
+                                        bb = new_bb;
+                                    }
+                                    ast::InitExpr::Array(_v) => {
+                                        panic!("array initializer in scalar")
+                                    }
                                 }
-                                ast::InitExpr::Array(_v) => unimplemented!("array init"),
+                                self.init_global = Some((init_global, bb));
                             }
-                            self.init_global = Some((init_global, bb));
                         }
                     }
                 }

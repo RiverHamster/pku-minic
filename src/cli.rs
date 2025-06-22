@@ -49,7 +49,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
                 );
                 conf.output_type = OutputType::Koopa;
             }
-            "-riscv" => {
+            "-riscv" | "-perf" => {
                 assert_eq!(
                     conf.output_type,
                     OutputType::Unknown,

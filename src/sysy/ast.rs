@@ -121,9 +121,9 @@ pub struct Block(pub Vec<BlockItem>);
 
 #[derive(Debug, Clone)]
 pub struct FuncParam {
-    // TODO: array argument
     pub ty: BaseType,
     pub name: Ident,
+    pub dims: Vec<Option<Expr>>,
 }
 
 #[derive(Debug, Clone)]
