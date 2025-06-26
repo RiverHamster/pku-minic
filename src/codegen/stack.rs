@@ -134,7 +134,7 @@ pub fn load_addr(
                     writeln!(writer, "  add {reg}, sp, {reg}").unwrap();
                 }
             }
-            ValueKind::GetElemPtr(_) | ValueKind::GetPtr(_) | ValueKind::Load(_) => {
+            ValueKind::GetElemPtr(_) | ValueKind::GetPtr(_) | ValueKind::Load(_) | ValueKind::BlockArgRef(_) | ValueKind::FuncArgRef(_) => {
                 // Result of GEP and GP are stored in the value.
                 // TODO: Load is added here to handle the case where a pointer is loaded from stack.
                 let offset = stk_val.get(v, dfg);

@@ -6,10 +6,10 @@ pub enum OutputType {
     RISCV,
     LLVM,
 }
-
 #[derive(Debug)]
 pub struct Config {
     pub output_type: OutputType,
+    pub ssa: bool,
     pub inputs: Vec<String>,
     pub output: String,
 }
@@ -20,6 +20,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
 
     let mut conf = Config {
         output_type: OutputType::Unknown,
+        ssa: true,
         inputs: Vec::new(),
         output: String::new(),
     };
@@ -64,6 +65,9 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
                     "Duplicate output type"
                 );
                 conf.output_type = OutputType::LLVM;
+            }
+            "-nossa" => {
+                conf.ssa = false;
             }
             _ => {
                 conf.inputs.push(arg);

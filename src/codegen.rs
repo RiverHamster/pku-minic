@@ -76,11 +76,36 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
         let mut stk_val = StackManager::new(stack.arg_cons, false);
         let mut stk_var = StackManager::new(stack.arg_cons + stack.val, true);
 
+        // Save the values for function arguments.
+        for (i, v) in f.params().iter().enumerate() {
+            let val_off = stk_val.get(*v, dfg);
+            if i < RV_N_ARGREG {
+                write_stack(&mut self.writer, val_off, &format!("a{}", i));
+            } else {
+                let src_off = RV_WORD_SIZE * (i - RV_N_ARGREG) + stack_size;
+                load_stack(&mut self.writer, src_off, "t0");
+                write_stack(&mut self.writer, val_off, "t0");
+            }
+        }
+
         for (val, val_data) in dfg.values() {
             if let ValueKind::Integer(i) = val_data.kind() {
                 let pos = stk_val.get(*val, dfg);
                 writeln!(self.writer, "  li t0, {}", i.value()).unwrap();
                 write_stack(&mut self.writer, pos, "t0");
+            }
+        }
+
+        macro_rules! pass_bb_args {
+            ($target:expr, $actuals:expr) => {
+                let args_formal = dfg.bb($target).params();
+                let args_actual = $actuals;
+                for (formal, actual) in args_formal.iter().zip(args_actual.iter()) {
+                    let f_off = stk_val.get(*formal, dfg);
+                    let a_off = stk_val.get(*actual, dfg);
+                    load_stack(&mut self.writer, a_off, "t0");
+                    write_stack(&mut self.writer, f_off, "t0");
+                }
             }
         }
 
@@ -108,8 +133,7 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                                 &mut stk_val,
                                 &mut stk_var,
                             );
-                        } else {
-                            let src_data = dfg.value(l.src());
+                        } else { let src_data = dfg.value(l.src());
                             match src_data.kind() {
                                 ValueKind::Alloc(_) => {
                                     let src_off = stk_var.get(l.src(), dfg);
@@ -282,11 +306,11 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                         write_stack(&mut self.writer, pos, "t0");
                     }
                     ValueKind::Jump(j) => {
-                        let target = j.target();
+                        pass_bb_args!(j.target(), j.args());
                         writeln!(
                             self.writer,
                             "  j L{}",
-                            &dfg.bb(target).name().as_ref().unwrap()[1..]
+                            &dfg.bb(j.target()).name().as_ref().unwrap()[1..]
                         )
                         .unwrap();
                     }
@@ -314,7 +338,9 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                         let t_true = &dfg.bb(target_true).name().as_ref().unwrap()[1..];
                         let t_false = &dfg.bb(target_false).name().as_ref().unwrap()[1..];
                         writeln!(self.writer, "  bnez t0, B{}", self.long_branch_label).unwrap();
+                        pass_bb_args!(target_false, b.false_args());
                         writeln!(self.writer, "  j L{}", t_false).unwrap();
+                        pass_bb_args!(target_true, b.true_args());
                         writeln!(self.writer, "B{}: j L{}", self.long_branch_label, t_true)
                             .unwrap();
                         self.long_branch_label += 1;

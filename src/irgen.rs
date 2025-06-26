@@ -240,10 +240,8 @@ impl IRBuilder {
                                 TypeKind::Array(_, _) => {
                                     // Convert sized array into a pointer.
                                     new_value!(self, f_handle).get_elem_ptr(lval.ptr, zero)
-                                },
-                                TypeKind::Pointer(_) => {
-                                    new_value!(self, f_handle).load(lval.ptr)
                                 }
+                                TypeKind::Pointer(_) => new_value!(self, f_handle).load(lval.ptr),
                                 _ => panic!("array parameter must be a pointer or array"),
                             };
                             add_insn!(self, f_handle, bb, [arg]);
@@ -740,9 +738,7 @@ impl IRBuilder {
                 .iter()
                 .map(|p| {
                     (Some(String::from("@") + p.name.0.as_str()), {
-                        // TODO: array parameters
                         assert!(p.ty == ast::BaseType::Int);
-                        // Type::get_i32()
                         if p.dims.is_empty() {
                             Type::get_i32()
                         } else {

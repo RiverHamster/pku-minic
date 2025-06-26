@@ -15,7 +15,12 @@ pub(super) struct LValueInfo {
 impl IRBuilder {
     /// Evaluate an lvalue expression. Return the pointer to the value.
     /// Example: i32 -> *i32, [i32; N] -> *[i32; N]; *i32 -> **i32;
-    pub(super) fn eval_lvalue(&mut self, f_handle: Function, mut bb: BasicBlock, e: &ast::Expr) -> (LValueInfo, BasicBlock) {
+    pub(super) fn eval_lvalue(
+        &mut self,
+        f_handle: Function,
+        mut bb: BasicBlock,
+        e: &ast::Expr,
+    ) -> (LValueInfo, BasicBlock) {
         // eprintln!("eval_lvalue: {:?}", e);
         let info = match e {
             ast::Expr::Ident(i) => {
@@ -40,7 +45,10 @@ impl IRBuilder {
                 bb = bb1;
                 let (index, bb2) = self.eval_expr(f_handle, bb, rhs);
                 bb = bb2;
-                assert!(self.get_type(&index, f_handle).is_i32(), "array index must be int");
+                assert!(
+                    self.get_type(&index, f_handle).is_i32(),
+                    "array index must be int"
+                );
 
                 let lty = self.get_type(&lval.ptr, f_handle);
                 let lkind_deref = match lty.kind() {
@@ -49,8 +57,9 @@ impl IRBuilder {
                 };
 
                 let indexed = match lkind_deref {
-                    koopa::ir::TypeKind::Array(_, _) =>
-                        new_value!(self, f_handle).get_elem_ptr(lval.ptr, index),
+                    koopa::ir::TypeKind::Array(_, _) => {
+                        new_value!(self, f_handle).get_elem_ptr(lval.ptr, index)
+                    }
                     koopa::ir::TypeKind::Pointer(_) => {
                         let deref = new_value!(self, f_handle).load(lval.ptr);
                         add_insn!(self, f_handle, bb, [deref]);

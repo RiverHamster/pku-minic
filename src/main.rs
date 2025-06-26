@@ -1,11 +1,16 @@
 mod cli;
 mod codegen;
 mod irgen;
+mod irpass;
+mod mem2reg;
 mod sysy;
 use koopa;
 use std::env;
 use std::fs;
 use std::io::Write;
+
+use crate::irpass::IRPass;
+use crate::mem2reg::Mem2Reg;
 
 fn main() {
     let conf = cli::parse_args(env::args());
@@ -23,7 +28,11 @@ fn main() {
         return;
     }
 
-    let ir_program = irgen::gen_ir(&ast);
+    let mut ir_program = irgen::gen_ir(&ast);
+    if conf.ssa {
+        let mut mem2reg_pass = Mem2Reg {};
+        mem2reg_pass.run(&mut ir_program);
+    }
 
     match conf.output_type {
         cli::OutputType::AST => {
