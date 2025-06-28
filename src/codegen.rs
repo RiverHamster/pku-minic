@@ -40,17 +40,20 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
         }
         let dfg = f.dfg();
         let f_name = &f.name()[1..];
-        writeln!(self.writer, "  .globl {}\n{}:", f_name, f_name).unwrap();
+        writeln!(self.writer, "  .globl {}", f_name).unwrap();
+        writeln!(self.writer, "  .type {}, @function", f_name).unwrap();
+        writeln!(self.writer, "{}:", f_name).unwrap();
 
         let arg_idx: HashMap<Value, usize> =
             HashMap::from_iter(f.params().iter().enumerate().map(|(i, v)| (*v, i)));
 
         // let (stack_size, val_size) = stack_size(prog, f_handle);
         let stack = stack_size(prog, f_handle);
-        let stack_size = align(
+        let stack_size: usize = align(
             stack.alloc + stack.val + stack.arg_cons + stack.save_regs,
             16,
         );
+
         // eprintln!(
         //     "add_func {}, stack {:?}, allocation {}",
         //     f.name(),
@@ -65,9 +68,19 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
             writeln!(self.writer, "  addi sp, sp, -{}", stack_size).unwrap();
         }
 
-        let ra_off = stack.arg_cons + stack.val + stack.alloc;
-        if stack.save_ra {
-            write_stack(&mut self.writer, ra_off, "ra");
+        // let ra_off = stack.arg_cons + stack.val + stack.alloc;
+        // if stack.save_ra {
+        //     write_stack(&mut self.writer, ra_off, "ra");
+        // }
+        let ra_off = stack_size - 4;
+        let fp_off = stack_size - 8;
+        write_stack(&mut self.writer, stack_size - 4, "ra");
+        write_stack(&mut self.writer, stack_size - 8, "fp");
+        if stack_size < RV_ADDI_LIMIT {
+            writeln!(self.writer, "  addi fp, sp, {stack_size}").unwrap();
+        } else {
+            writeln!(self.writer, "  li fp, {stack_size}").unwrap();
+            writeln!(self.writer, "  add fp, sp, fp").unwrap();
         }
 
         // Values are stored on stack.
@@ -112,7 +125,7 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
         let bbs = f.layout().bbs();
         for (bb, bbn) in bbs {
             let bb_name = dfg.bb(*bb).name().as_ref().unwrap();
-            writeln!(self.writer, "L{}:", &bb_name[1..]).unwrap();
+            writeln!(self.writer, ".L{}:", &bb_name[1..]).unwrap();
             for (val_handle, _inst_node) in bbn.insts() {
                 let val = dfg.value(*val_handle);
                 match val.kind() {
@@ -257,10 +270,12 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                             load_stack(&mut self.writer, pos, "a0");
                         }
 
-                        if stack.save_ra {
-                            let ra_off = stack.arg_cons + stack.val + stack.alloc;
-                            load_stack(&mut self.writer, ra_off, "ra");
-                        }
+                        // if stack.save_ra {
+                        //     let ra_off = stack.arg_cons + stack.val + stack.alloc;
+                        //     load_stack(&mut self.writer, ra_off, "ra");
+                        // }
+                        load_stack(&mut self.writer, ra_off, "ra");
+                        load_stack(&mut self.writer, fp_off, "fp");
 
                         if stack_size > RV_ADDI_LIMIT {
                             writeln!(self.writer, "  li t0, {}", stack_size).unwrap();
@@ -309,7 +324,7 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                         pass_bb_args!(j.target(), j.args());
                         writeln!(
                             self.writer,
-                            "  j L{}",
+                            "  j .L{}",
                             &dfg.bb(j.target()).name().as_ref().unwrap()[1..]
                         )
                         .unwrap();
@@ -337,11 +352,11 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
                         // Use long format to handle large functions.
                         let t_true = &dfg.bb(target_true).name().as_ref().unwrap()[1..];
                         let t_false = &dfg.bb(target_false).name().as_ref().unwrap()[1..];
-                        writeln!(self.writer, "  bnez t0, B{}", self.long_branch_label).unwrap();
+                        writeln!(self.writer, "  bnez t0, .B{}", self.long_branch_label).unwrap();
                         pass_bb_args!(target_false, b.false_args());
-                        writeln!(self.writer, "  j L{}", t_false).unwrap();
+                        writeln!(self.writer, "  j .L{}", t_false).unwrap();
                         pass_bb_args!(target_true, b.true_args());
-                        writeln!(self.writer, "B{}: j L{}", self.long_branch_label, t_true)
+                        writeln!(self.writer, ".B{}: j .L{}", self.long_branch_label, t_true)
                             .unwrap();
                         self.long_branch_label += 1;
                     }
@@ -427,6 +442,7 @@ impl<W: io::Write> SimpleRISCVBuilder<W> {
             }
         }
 
+        writeln!(&mut self.writer, ".size {}, . - {}", f_name, f_name).unwrap();
         writeln!(&mut self.writer).unwrap();
     }
 

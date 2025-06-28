@@ -20,8 +20,8 @@ pub fn stack_size(prog: &Program, f: Function) -> StackSize {
         alloc: 0,
         val: 0,
         arg_cons: 0,
-        save_regs: 0,
-        save_ra: false,
+        save_regs: 2 * RV_WORD_SIZE,
+        save_ra: true,
     };
     for (_, v) in prog.func(f).dfg().values() {
         s.val += v.ty().size();
@@ -36,7 +36,7 @@ pub fn stack_size(prog: &Program, f: Function) -> StackSize {
             ValueKind::Call(c) => {
                 s.arg_cons = s.arg_cons.max(RV_WORD_SIZE * c.args().len());
                 // Save RA.
-                s.save_regs = RV_WORD_SIZE;
+                // s.save_regs = RV_WORD_SIZE;
                 s.save_ra = true;
             }
             _ => {}

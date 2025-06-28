@@ -51,4 +51,11 @@ pub fn decl_sysy_stdlib(p: &mut IRBuilder) {
         Type::get_unit(),
     ));
     p.funcs.insert("stoptime".into(), f);
+    let f = p.prog.new_func(FunctionData::new_decl(
+        "@rv_backtrace".into(),
+        vec![],
+        Type::get_unit(),
+    ));
+
+    p.funcs.insert("rv_backtrace".into(), f);
 }
